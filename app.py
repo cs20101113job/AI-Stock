@@ -52,7 +52,7 @@ if not check_password():
     st.stop()
 
 # ==================== 主系統畫面 (登入成功後呈現) ====================
-st.title("📈 股票買賣記錄與即時監控系統")
+st.title("📈 股票買賣記錄與即時監控系統{app_version}")
 
 # 側邊欄增加登出按鈕
 with st.sidebar:
