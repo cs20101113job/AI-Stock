@@ -3,7 +3,9 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import requests
+import subprocess
 from datetime import datetime
+from pathlib import Path
 
 SHEET_COLUMNS = [
     "股號", "股名", "類股", "種類", "交易狀態",
@@ -54,8 +56,28 @@ if not check_password():
 
 # ==================== 主系統畫面 (登入成功後呈現) ====================
 st.title("📈 股票買賣記錄與即時監控系統")
-version_number = "v1.2.0"
-update_date = "2026-10-20"
+
+
+def get_version_info():
+    repository = Path(__file__).resolve().parent
+    commit_count = subprocess.run(
+        ["git", "rev-list", "--count", "HEAD"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    update_date = subprocess.run(
+        ["git", "log", "-1", "--format=%cs"],
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    return f"v1.2.{int(commit_count)}", update_date
+
+
+version_number, update_date = get_version_info()
 
 st.write(f"📊 系統版本: {version_number} ({update_date})")
 
@@ -121,6 +143,93 @@ def normalize_sheet_data(data):
     return df
 
 
+def parse_trade_dates(values):
+    def parse_date(value):
+        if pd.isna(value):
+            return pd.NaT
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if not pd.notna(value):
+                return pd.NaT
+            numeric_value = int(value)
+            value_text = str(numeric_value)
+            if len(value_text) == 8:
+                return pd.to_datetime(value_text, format="%Y%m%d", errors="coerce")
+            if 1 <= numeric_value <= 100000:
+                return pd.Timestamp("1899-12-30") + pd.to_timedelta(numeric_value, unit="D")
+            return pd.NaT
+
+        value_text = str(value).strip()
+        if not value_text:
+            return pd.NaT
+        if value_text.endswith(".0") and value_text[:-2].isdigit():
+            value_text = value_text[:-2]
+        if len(value_text) == 8 and value_text.isdigit():
+            return pd.to_datetime(value_text, format="%Y%m%d", errors="coerce")
+        if value_text.isdigit():
+            serial = int(value_text)
+            if 1 <= serial <= 100000:
+                return pd.Timestamp("1899-12-30") + pd.to_timedelta(serial, unit="D")
+            return pd.NaT
+        return pd.to_datetime(value_text, errors="coerce")
+
+    return values.map(parse_date)
+
+
+def prepare_monthly_trade_data(data):
+    chart_data = data.copy()
+    required_columns = [
+        "股號", "股名", "實際買股日期", "實際買股金額", "實際買股數量",
+        "實際買股花費金額", "實際賣股日期", "實際賣股金額", "實際賣股數量",
+        "實際賣股所得金額",
+    ]
+    for column in required_columns:
+        if column not in chart_data.columns:
+            chart_data[column] = pd.NA
+
+    for column in (
+        "實際買股金額",
+        "實際買股數量",
+        "實際買股花費金額",
+        "實際賣股金額",
+        "實際賣股數量",
+        "實際賣股所得金額",
+    ):
+        chart_data[column] = pd.to_numeric(
+            chart_data[column].astype(str).str.replace(",", "", regex=False),
+            errors="coerce",
+        )
+
+    for price_column, quantity_column, total_column in (
+        ("實際買股金額", "實際買股數量", "實際買股花費金額"),
+        ("實際賣股金額", "實際賣股數量", "實際賣股所得金額"),
+    ):
+        calculated_total = chart_data[price_column] * chart_data[quantity_column]
+        missing_total = chart_data[total_column].isna() | chart_data[total_column].eq(0)
+        has_trade_data = chart_data[price_column].gt(0) & chart_data[quantity_column].gt(0)
+        chart_data.loc[missing_total & has_trade_data, total_column] = calculated_total
+        chart_data[total_column] = chart_data[total_column].fillna(0)
+
+    chart_data["_買入日期"] = parse_trade_dates(chart_data["實際買股日期"])
+    chart_data["_賣出日期"] = parse_trade_dates(chart_data["實際賣股日期"])
+    chart_data["_買入月份"] = chart_data["_買入日期"].dt.strftime("%Y-%m")
+    chart_data["_賣出月份"] = chart_data["_賣出日期"].dt.strftime("%Y-%m")
+
+    buy_monthly = (
+        chart_data.dropna(subset=["_買入月份"])
+        .groupby("_買入月份")["實際買股花費金額"]
+        .sum()
+        .rename("實際買入金額")
+    )
+    sell_monthly = (
+        chart_data.dropna(subset=["_賣出月份"])
+        .groupby("_賣出月份")["實際賣股所得金額"]
+        .sum()
+        .rename("實際賣出金額")
+    )
+    monthly = pd.concat([buy_monthly, sell_monthly], axis=1).fillna(0).sort_index()
+    return chart_data, monthly
+
+
 def load_data():
     try:
         response = requests.get(GAS_WEB_APP_URL, timeout=15)
@@ -174,6 +283,12 @@ def send_telegram_msg(message):
                 "Telegram 找不到這個 chat。若為私人對話，請先開啟機器人並傳送 /start；"
                 "若為群組，請先將機器人加入群組並在群組傳送一則訊息，"
                 "再確認 TELEGRAM_CHAT_ID 是該對話的正確 ID。"
+            )
+        elif description == "Forbidden: the bot can't send messages to the bot":
+            description = (
+                "目前的 TELEGRAM_CHAT_ID 指向另一個 Telegram 機器人；Telegram 不允許機器人互相傳訊。"
+                "請用自己的個人 Telegram 帳號開啟 AI 股票機器人、傳送 /start，"
+                "並將個人對話的 chat.id 設為 TELEGRAM_CHAT_ID。"
             )
         return False, description
     except (requests.RequestException, ValueError) as e:
@@ -374,47 +489,22 @@ with tab2:
 with tab3:
     st.subheader("📊 統計分析圖表")
     if not df.empty:
-        df_chart = df.copy()
-        required_columns = [
-            "股號", "股名", "實際買股日期", "實際買股花費金額",
-            "實際賣股日期", "實際賣股所得金額",
-        ]
-        for column in required_columns:
-            if column not in df_chart.columns:
-                df_chart[column] = pd.NA
-
-        for column in ("實際買股花費金額", "實際賣股所得金額"):
-            df_chart[column] = pd.to_numeric(df_chart[column], errors="coerce").fillna(0)
-
-        def parse_trade_dates(values):
-            values = values.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
-            parsed = pd.to_datetime(values, format="%Y%m%d", errors="coerce")
-            missing_dates = parsed.isna()
-            if missing_dates.any():
-                parsed.loc[missing_dates] = values.loc[missing_dates].map(
-                    lambda value: pd.to_datetime(value, errors="coerce")
-                )
-            return parsed
-
-        df_chart["_買入月份"] = parse_trade_dates(df_chart["實際買股日期"]).dt.strftime("%Y-%m")
-        df_chart["_賣出月份"] = parse_trade_dates(df_chart["實際賣股日期"]).dt.strftime("%Y-%m")
-
-        buy_monthly = (
-            df_chart.dropna(subset=["_買入月份"])
-            .groupby("_買入月份")["實際買股花費金額"]
-            .sum()
-            .rename("實際買入金額")
-        )
-        sell_monthly = (
-            df_chart.dropna(subset=["_賣出月份"])
-            .groupby("_賣出月份")["實際賣股所得金額"]
-            .sum()
-            .rename("實際賣出金額")
-        )
-        monthly = pd.concat([buy_monthly, sell_monthly], axis=1).fillna(0).sort_index()
+        df_chart, monthly = prepare_monthly_trade_data(df)
 
         if monthly.empty or not monthly.to_numpy().any():
-            st.info("目前沒有可繪製的實際買賣金額與有效日期，請確認 Google Sheet 的日期及金額欄位。")
+            st.info(
+                "目前資料中找不到同時具備有效日期與實際交易金額的買賣紀錄。"
+                "日期可使用 YYYYMMDD、YYYY-MM-DD 或 Google 試算表日期格式；"
+                "金額可由實際成交價 × 股數計算。請檢查下方資料對照。"
+            )
+            diagnostic_columns = [
+                column for column in (
+                    "股號", "股名", "實際買股日期", "實際買股金額",
+                    "實際買股數量", "實際買股花費金額", "實際賣股日期",
+                    "實際賣股金額", "實際賣股數量", "實際賣股所得金額",
+                ) if column in df_chart.columns
+            ]
+            st.dataframe(df_chart[diagnostic_columns], use_container_width=True)
         else:
             monthly["當月現金流"] = monthly["實際賣出金額"] - monthly["實際買入金額"]
             st.markdown("### 每月實際買賣金額")
