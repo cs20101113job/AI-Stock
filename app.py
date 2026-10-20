@@ -11,6 +11,7 @@ SHEET_COLUMNS = [
     "實際買股日期", "實際買股金額", "實際買股數量", "實際買股花費金額", "買股手續費",
     "預計賣股金額", "預計賣股數量", "預計賣股所得金額",
     "實際賣股日期", "實際賣股金額", "實際賣股數量", "實際賣股所得金額", "賣股手續費",
+    "英文股名",
 ]
 
 # ==================== 頁面設定 ====================
@@ -84,8 +85,24 @@ def normalize_sheet_data(data):
             df = pd.DataFrame(data)
         except ValueError:
             df = pd.DataFrame([data])
+        if not set(SHEET_COLUMNS).intersection(str(column) for column in df.columns):
+            values = [list(data)]
+            values.extend(df.astype(object).values.tolist())
+            df = pd.DataFrame(values)
     elif isinstance(data, list):
-        df = pd.DataFrame(data)
+        if data and all(isinstance(row, dict) for row in data):
+            response_columns = list(data[0])
+            known_columns = set(SHEET_COLUMNS)
+            if not known_columns.intersection(response_columns):
+                # Some GAS implementations use the first sheet row as JSON keys,
+                # so restore that row and map each returned row to known fields.
+                values = [response_columns]
+                values.extend([[row.get(column) for column in response_columns] for row in data])
+                df = pd.DataFrame(values)
+            else:
+                df = pd.DataFrame(data)
+        else:
+            df = pd.DataFrame(data)
     else:
         raise ValueError("Google Apps Script 回傳的資料格式不是表格資料。")
 
@@ -147,7 +164,14 @@ def send_telegram_msg(message):
         result = response.json()
         if response.ok and result.get("ok"):
             return True, "Telegram 測試訊息已成功送出。"
-        return False, result.get("description", f"Telegram 回應狀態碼 {response.status_code}")
+        description = result.get("description", f"Telegram 回應狀態碼 {response.status_code}")
+        if description == "Bad Request: chat not found":
+            description = (
+                "Telegram 找不到這個 chat。若為私人對話，請先開啟機器人並傳送 /start；"
+                "若為群組，請先將機器人加入群組並在群組傳送一則訊息，"
+                "再確認 TELEGRAM_CHAT_ID 是該對話的正確 ID。"
+            )
+        return False, description
     except (requests.RequestException, ValueError) as e:
         return False, f"Telegram 發送失敗：{e}"
 
@@ -157,7 +181,8 @@ def get_stock_info(stock_id):
     stock_id = str(stock_id).strip()
     if stock_id.endswith(".0") and stock_id[:-2].isdigit():
         stock_id = stock_id[:-2]
-    fallback_name = f"台股{stock_id}"
+    english_name = ""
+    price = None
 
     for suffix in (".TW", ".TWO"):
         ticker = yf.Ticker(f"{stock_id}{suffix}")
@@ -170,13 +195,50 @@ def get_stock_info(stock_id):
         except Exception:
             info = {}
 
-        name = info.get("shortName") or info.get("longName")
-        if not hist.empty:
-            return name or fallback_name, float(hist["Close"].iloc[-1])
-        if name:
-            fallback_name = name
+        english_name = info.get("shortName") or info.get("longName") or english_name
+        if not hist.empty and price is None:
+            price = float(hist["Close"].iloc[-1])
 
-    return fallback_name, None
+    stock_names, _ = load_taiwan_stock_names()
+    chinese_name, listed_english_name = stock_names.get(stock_id, ("", ""))
+    english_name = english_name or listed_english_name
+    chinese_name = chinese_name or f"台股{stock_id}"
+    return chinese_name, english_name or f"Taiwan stock {stock_id}", price
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_taiwan_stock_names():
+    sources = (
+        (
+            "https://openapi.twse.com.tw/v1/opendata/t187ap03_L",
+            "公司代號",
+            "公司簡稱",
+            "英文簡稱",
+        ),
+        (
+            "https://www.tpex.org.tw/openapi/v1/mopsfin_t187ap03_O",
+            "SecuritiesCompanyCode",
+            "CompanyAbbreviation",
+            "Symbol",
+        ),
+    )
+    names = {}
+    errors = []
+    for url, code_key, chinese_key, english_key in sources:
+        try:
+            response = requests.get(url, timeout=15)
+            response.raise_for_status()
+            companies = response.json()
+            for company in companies:
+                code = str(company.get(code_key, "")).strip()
+                if code:
+                    names[code] = (
+                        str(company.get(chinese_key, "")).strip(),
+                        str(company.get(english_key, "")).strip(),
+                    )
+        except (requests.RequestException, ValueError) as e:
+            errors.append(f"{url}: {e}")
+    return names, errors
 
 # ==================== 分頁頁籤 ====================
 tab1, tab2, tab3 = st.tabs(["📝 新增買賣紀錄", "📊 買賣紀錄表與觸發點監控", "📈 統計圖表分析"])
@@ -189,9 +251,16 @@ with tab1:
     with col_basic1:
         stock_id = st.text_input("股號 (例如: 2330)", "2330")
     
-    stock_name, current_price = get_stock_info(stock_id) if stock_id else ("-", None)
+    stock_chinese_name, stock_english_name, current_price = (
+        get_stock_info(stock_id) if stock_id else ("-", "-", None)
+    )
+    if stock_id:
+        _, stock_name_errors = load_taiwan_stock_names()
+        if stock_name_errors:
+            st.warning("無法連線至部分臺灣交易所公司資料，中文股名可能暫時以股號代替。")
     with col_basic2:
-        st.text_input("股名", value=stock_name, disabled=True)
+        st.text_input("中文股名", value=stock_chinese_name, disabled=True)
+        st.text_input("英文股名", value=stock_english_name, disabled=True)
     with col_basic3:
         category = st.text_input("類股 (例如: 電子股)", "電子股")
     with col_basic4:
@@ -237,11 +306,12 @@ with tab1:
 
     if st.button("💾 儲存並寫入 Google Sheet"):
         new_row = [
-            stock_id, stock_name, category, sub_category, status,
+            stock_id, stock_chinese_name, category, sub_category, status,
             p_buy_price, p_buy_qty, p_buy_total,
             r_buy_date, r_buy_price, r_buy_qty, r_buy_total, r_buy_fee,
             p_sell_price, p_sell_qty, p_sell_total,
-            r_sell_date, r_sell_price, r_sell_qty, r_sell_total, r_sell_fee
+            r_sell_date, r_sell_price, r_sell_qty, r_sell_total, r_sell_fee,
+            stock_english_name,
         ]
         if save_to_google_sheet(new_row):
             st.success("成功寫入 Google Sheet！")
@@ -269,18 +339,19 @@ with tab2:
             s_id = str(row.get("股號", "")).strip()
             if s_id.endswith(".0") and s_id[:-2].isdigit():
                 s_id = s_id[:-2]
-            s_name, market_p = get_stock_info(s_id)
+            s_chinese_name, s_english_name, market_p = get_stock_info(s_id)
+            stock_label = f"{s_chinese_name} / {s_english_name}"
             p_buy_p = pd.to_numeric(row.get("預計買股金額", 0), errors="coerce")
             p_sell_p = pd.to_numeric(row.get("預計賣股金額", 0), errors="coerce")
             p_buy_p = 0 if pd.isna(p_buy_p) else p_buy_p
             p_sell_p = 0 if pd.isna(p_sell_p) else p_sell_p
 
             if market_p is None:
-                st.warning(f"無法取得 {s_name}（{s_id}）的 Yahoo 股價。")
+                st.warning(f"無法取得 {stock_label}（{s_id}）的 Yahoo 股價。")
                 continue
 
             if p_buy_p > 0 and market_p <= p_buy_p:
-                msg = f"🟢 【買入警報】{s_name}({s_id})\n當前股價: {market_p}\n已達到預計買入價: {p_buy_p}"
+                msg = f"🟢 【買入警報】{stock_label}({s_id})\n當前股價: {market_p}\n已達到預計買入價: {p_buy_p}"
                 sent, result = send_telegram_msg(msg)
                 if sent:
                     st.success(msg)
@@ -288,7 +359,7 @@ with tab2:
                     st.error(result)
 
             if p_sell_p > 0 and market_p >= p_sell_p:
-                msg = f"🔴 【賣出警報】{s_name}({s_id})\n當前股價: {market_p}\n已達到預計賣出價: {p_sell_p}"
+                msg = f"🔴 【賣出警報】{stock_label}({s_id})\n當前股價: {market_p}\n已達到預計賣出價: {p_sell_p}"
                 sent, result = send_telegram_msg(msg)
                 if sent:
                     st.success(msg)
