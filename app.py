@@ -135,7 +135,11 @@ def load_data():
 
 def save_to_google_sheet(row_data):
     try:
-        response = requests.post(GAS_WEB_APP_URL, json={"row": row_data}, timeout=15)
+        response = requests.post(
+            GAS_WEB_APP_URL,
+            json={"headers": SHEET_COLUMNS, "row": row_data},
+            timeout=15,
+        )
         if response.status_code == 200 and response.json().get("result") == "success":
             return True
         else:
