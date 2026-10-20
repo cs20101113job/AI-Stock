@@ -5,6 +5,14 @@ import plotly.graph_objects as go
 import requests
 from datetime import datetime
 
+SHEET_COLUMNS = [
+    "股號", "股名", "類股", "種類", "交易狀態",
+    "預計買股金額", "預計買股數量", "預計買股花費金額",
+    "實際買股日期", "實際買股金額", "實際買股數量", "實際買股花費金額", "買股手續費",
+    "預計賣股金額", "預計賣股數量", "預計賣股所得金額",
+    "實際賣股日期", "實際賣股金額", "實際賣股數量", "實際賣股所得金額", "賣股手續費",
+]
+
 # ==================== 頁面設定 ====================
 st.set_page_config(page_title="股票買賣記錄與監控系統", layout="wide")
 
@@ -56,29 +64,63 @@ with st.sidebar:
 # ==================== GAS Web App URL 設定 ====================
 GAS_WEB_APP_URL = st.secrets.get("GAS_WEB_APP_URL", "請在此處貼上你的_GAS_WEB_APP_URL")
 
+
+def normalize_sheet_data(data):
+    if isinstance(data, dict):
+        for key in ("data", "values", "rows"):
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+
+    if data is None or (isinstance(data, list) and not data):
+        return pd.DataFrame(columns=SHEET_COLUMNS)
+
+    if isinstance(data, dict):
+        try:
+            df = pd.DataFrame(data)
+        except ValueError:
+            df = pd.DataFrame([data])
+    elif isinstance(data, list):
+        df = pd.DataFrame(data)
+    else:
+        raise ValueError("Google Apps Script 回傳的資料格式不是表格資料。")
+
+    if df.empty:
+        return pd.DataFrame(columns=SHEET_COLUMNS)
+
+    if all(str(column).isdigit() for column in df.columns):
+        columns = SHEET_COLUMNS + [
+            f"其他欄位_{index + 1}"
+            for index in range(max(0, len(df.columns) - len(SHEET_COLUMNS)))
+        ]
+        df.columns = columns[:len(df.columns)]
+    else:
+        df.columns = [str(column).strip() for column in df.columns]
+
+    return df
+
+
 def load_data():
     try:
-        response = requests.get(GAS_WEB_APP_URL)
+        response = requests.get(GAS_WEB_APP_URL, timeout=15)
         if response.status_code == 200:
-            data = response.json()
-            df = pd.DataFrame(data)
-            return df
+            return normalize_sheet_data(response.json())
         else:
             st.error(f"無法讀取 Google Sheet 資料，狀態碼: {response.status_code}")
             return pd.DataFrame()
-    except Exception as e:
+    except (requests.RequestException, ValueError) as e:
         st.error(f"連線至 Google Apps Script 失敗: {e}")
         return pd.DataFrame()
 
 def save_to_google_sheet(row_data):
     try:
-        response = requests.post(GAS_WEB_APP_URL, json={"row": row_data})
+        response = requests.post(GAS_WEB_APP_URL, json={"row": row_data}, timeout=15)
         if response.status_code == 200 and response.json().get("result") == "success":
             return True
         else:
             st.error(f"寫入失敗: {response.text}")
             return False
-    except Exception as e:
+    except (requests.RequestException, ValueError) as e:
         st.error(f"寫入 Google Sheet 發生錯誤: {e}")
         return False
 
@@ -88,26 +130,49 @@ df = load_data()
 def send_telegram_msg(message):
     token = st.secrets.get("TELEGRAM_BOT_TOKEN")
     chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
-    if token and chat_id:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message}
-        try:
-            requests.post(url, json=payload)
-        except Exception as e:
-            st.error(f"Telegram 發送失敗: {e}")
+    if not token or not chat_id:
+        return False, "請先在 Streamlit secrets 設定 TELEGRAM_BOT_TOKEN 與 TELEGRAM_CHAT_ID。"
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        response = requests.post(
+            url,
+            json={"chat_id": chat_id, "text": message},
+            timeout=15,
+        )
+        result = response.json()
+        if response.ok and result.get("ok"):
+            return True, "Telegram 測試訊息已成功送出。"
+        return False, result.get("description", f"Telegram 回應狀態碼 {response.status_code}")
+    except (requests.RequestException, ValueError) as e:
+        return False, f"Telegram 發送失敗：{e}"
 
 # ==================== Yahoo 股市價格抓取 ====================
+@st.cache_data(ttl=300, show_spinner=False)
 def get_stock_info(stock_id):
-    ticker_symbol = f"{stock_id}.TW"
-    ticker = yf.Ticker(ticker_symbol)
-    try:
-        info = ticker.info
-        name = info.get("shortName") or info.get("longName") or f"台股{stock_id}"
-        hist = ticker.history(period="1d")
-        price = hist["Close"].iloc[-1] if not hist.empty else None
-        return name, price
-    except Exception:
-        return f"台股{stock_id}", None
+    stock_id = str(stock_id).strip()
+    if stock_id.endswith(".0") and stock_id[:-2].isdigit():
+        stock_id = stock_id[:-2]
+    fallback_name = f"台股{stock_id}"
+
+    for suffix in (".TW", ".TWO"):
+        ticker = yf.Ticker(f"{stock_id}{suffix}")
+        try:
+            hist = ticker.history(period="1d")
+        except Exception:
+            continue
+        try:
+            info = ticker.info
+        except Exception:
+            info = {}
+
+        name = info.get("shortName") or info.get("longName")
+        if not hist.empty:
+            return name or fallback_name, float(hist["Close"].iloc[-1])
+        if name:
+            fallback_name = name
+
+    return fallback_name, None
 
 # ==================== 分頁頁籤 ====================
 tab1, tab2, tab3 = st.tabs(["📝 新增買賣紀錄", "📊 買賣紀錄表與觸發點監控", "📈 統計圖表分析"])
@@ -183,89 +248,152 @@ with tab2:
     st.subheader("📋 股票買賣記錄表")
     if not df.empty:
         st.dataframe(df, use_container_width=True)
-        
-        st.markdown("---")
-        st.subheader("🔔 即時觸發Telegram通知檢測")
-        if st.button("⚡ 檢查 Yahoo 股市價格並觸發通知"):
-            for idx, row in df.iterrows():
-                s_id = str(row.get('股號', ''))
-                s_name, market_p = get_stock_info(s_id)
-                
-                p_buy_p = float(row.get('預計買股金額', 0) or 0)
-                p_sell_p = float(row.get('預計賣股金額', 0) or 0)
-
-                if market_p:
-                    if p_buy_p > 0 and market_p <= p_buy_p:
-                        msg = f"🟢 【買入警報】{s_name}({s_id})\n當前股價: {market_p}\n已達到預計買入價: {p_buy_p}"
-                        send_telegram_msg(msg)
-                        st.info(msg)
-                    
-                    if p_sell_p > 0 and market_p >= p_sell_p:
-                        msg = f"🔴 【賣出警報】{s_name}({s_id})\n當前股價: {market_p}\n已達到預計賣出價: {p_sell_p}"
-                        send_telegram_msg(msg)
-                        st.success(msg)
     else:
         st.warning("目前尚無歷史交易資料。")
+
+    st.markdown("---")
+    st.subheader("🔔 Telegram 通知測試與即時觸發")
+    if st.button("📨 傳送 Telegram 測試訊息"):
+        sent, result = send_telegram_msg("✅ 股票買賣記錄系統 Telegram 測試訊息")
+        if sent:
+            st.success(result)
+        else:
+            st.error(result)
+
+    if st.button("⚡ 檢查 Yahoo 股市價格並觸發通知") and not df.empty:
+        for _, row in df.iterrows():
+            s_id = str(row.get("股號", "")).strip()
+            if s_id.endswith(".0") and s_id[:-2].isdigit():
+                s_id = s_id[:-2]
+            s_name, market_p = get_stock_info(s_id)
+            p_buy_p = pd.to_numeric(row.get("預計買股金額", 0), errors="coerce")
+            p_sell_p = pd.to_numeric(row.get("預計賣股金額", 0), errors="coerce")
+            p_buy_p = 0 if pd.isna(p_buy_p) else p_buy_p
+            p_sell_p = 0 if pd.isna(p_sell_p) else p_sell_p
+
+            if market_p is None:
+                st.warning(f"無法取得 {s_name}（{s_id}）的 Yahoo 股價。")
+                continue
+
+            if p_buy_p > 0 and market_p <= p_buy_p:
+                msg = f"🟢 【買入警報】{s_name}({s_id})\n當前股價: {market_p}\n已達到預計買入價: {p_buy_p}"
+                sent, result = send_telegram_msg(msg)
+                if sent:
+                    st.success(msg)
+                else:
+                    st.error(result)
+
+            if p_sell_p > 0 and market_p >= p_sell_p:
+                msg = f"🔴 【賣出警報】{s_name}({s_id})\n當前股價: {market_p}\n已達到預計賣出價: {p_sell_p}"
+                sent, result = send_telegram_msg(msg)
+                if sent:
+                    st.success(msg)
+                else:
+                    st.error(result)
 
 # -------------------- TAB 3: 統計圖表分析 --------------------
 with tab3:
     st.subheader("📊 統計分析圖表")
-    if not df.empty and '實際賣股日期' in df.columns:
+    if not df.empty:
         df_chart = df.copy()
-        df_chart['實際賣股YYYYMM'] = df_chart['實際賣股日期'].astype(str).str[:6]
-        
-        num_cols = ['實際買股花費金額', '實際賣股所得金額']
-        for col in num_cols:
-            if col in df_chart.columns:
-                df_chart[col] = pd.to_numeric(df_chart[col], errors='coerce').fillna(0)
-            else:
-                df_chart[col] = 0
+        required_columns = [
+            "股號", "股名", "實際買股日期", "實際買股花費金額",
+            "實際賣股日期", "實際賣股所得金額",
+        ]
+        for column in required_columns:
+            if column not in df_chart.columns:
+                df_chart[column] = pd.NA
 
-        grouped = df_chart.groupby('實際賣股YYYYMM').agg(
-            總買金額=('實際買股花費金額', 'sum'),
-            總賣金額=('實際賣股所得金額', 'sum')
-        ).reset_index()
-        
-        grouped['總賣扣掉總買金額'] = grouped['總賣金額'] - grouped['總買金額']
+        for column in ("實際買股花費金額", "實際賣股所得金額"):
+            df_chart[column] = pd.to_numeric(df_chart[column], errors="coerce").fillna(0)
 
-        # 圖表 1: 每月買賣狀況 (柱狀圖)
-        st.markdown("### 1. 每月買賣狀況 (整體統計)")
-        fig1 = go.Figure()
-        fig1.add_trace(go.Bar(x=grouped['實際賣股YYYYMM'], y=grouped['總買金額'], name='總買金額'))
-        fig1.add_trace(go.Bar(x=grouped['實際賣股YYYYMM'], y=grouped['總賣金額'], name='總賣金額'))
-        fig1.add_trace(go.Bar(x=grouped['實際賣股YYYYMM'], y=grouped['總賣扣掉總買金額'], name='總賣扣掉總買金額 (淨利)'))
-        
-        fig1.update_layout(
-            title="每月買賣狀況",
-            xaxis_title="實際賣股 YYYYMM",
-            yaxis_title="金額",
-            barmode='group'
+        def parse_trade_dates(values):
+            values = values.astype(str).str.strip().str.replace(r"\.0$", "", regex=True)
+            parsed = pd.to_datetime(values, format="%Y%m%d", errors="coerce")
+            missing_dates = parsed.isna()
+            if missing_dates.any():
+                parsed.loc[missing_dates] = values.loc[missing_dates].map(
+                    lambda value: pd.to_datetime(value, errors="coerce")
+                )
+            return parsed
+
+        df_chart["_買入月份"] = parse_trade_dates(df_chart["實際買股日期"]).dt.strftime("%Y-%m")
+        df_chart["_賣出月份"] = parse_trade_dates(df_chart["實際賣股日期"]).dt.strftime("%Y-%m")
+
+        buy_monthly = (
+            df_chart.dropna(subset=["_買入月份"])
+            .groupby("_買入月份")["實際買股花費金額"]
+            .sum()
+            .rename("實際買入金額")
         )
-        st.plotly_chart(fig1, use_container_width=True)
-
-        st.markdown("---")
-
-        # 圖表 2: 個股每月表現 (曲線圖)
-        st.markdown("### 2. 個股每月表現 (折線圖)")
-        stock_list = df_chart['股號'].astype(str).unique()
-        selected_stock = st.selectbox("選擇個股 (股號)", stock_list)
-
-        df_single = df_chart[df_chart['股號'].astype(str) == selected_stock]
-        grouped_single = df_single.groupby('實際賣股YYYYMM').agg(
-            總買金額=('實際買股花費金額', 'sum'),
-            總賣金額=('實際賣股所得金額', 'sum')
-        ).reset_index()
-        
-        grouped_single['總賣扣掉總買金額'] = grouped_single['總賣金額'] - grouped_single['總買金額']
-
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=grouped_single['實際賣股YYYYMM'], y=grouped_single['總買金額'], mode='lines+markers', name='總買金額'))
-        fig2.add_trace(go.Scatter(x=grouped_single['實際賣股YYYYMM'], y=grouped_single['總賣金額'], mode='lines+markers', name='總賣金額'))
-        fig2.add_trace(go.Scatter(x=grouped_single['實際賣股YYYYMM'], y=grouped_single['總賣扣掉總買金額'], mode='lines+markers', name='總賣扣掉總買金額'))
-
-        fig2.update_layout(
-            title=f"個股每月表現 ({selected_stock})",
-            xaxis_title="實際賣股 YYYYMM",
-            yaxis_title="金額"
+        sell_monthly = (
+            df_chart.dropna(subset=["_賣出月份"])
+            .groupby("_賣出月份")["實際賣股所得金額"]
+            .sum()
+            .rename("實際賣出金額")
         )
-        st.plotly_chart(fig2, use_container_width=True)
+        monthly = pd.concat([buy_monthly, sell_monthly], axis=1).fillna(0).sort_index()
+
+        if monthly.empty or not monthly.to_numpy().any():
+            st.info("目前沒有可繪製的實際買賣金額與有效日期，請確認 Google Sheet 的日期及金額欄位。")
+        else:
+            monthly["當月現金流"] = monthly["實際賣出金額"] - monthly["實際買入金額"]
+            st.markdown("### 每月實際買賣金額")
+            fig1 = go.Figure()
+            fig1.add_trace(go.Bar(x=monthly.index, y=monthly["實際買入金額"], name="實際買入金額"))
+            fig1.add_trace(go.Bar(x=monthly.index, y=monthly["實際賣出金額"], name="實際賣出金額"))
+            fig1.add_trace(go.Scatter(
+                x=monthly.index,
+                y=monthly["當月現金流"],
+                mode="lines+markers",
+                name="當月現金流（賣出 - 買入，非已實現損益）",
+            ))
+            fig1.update_layout(title="每月實際買賣統計", xaxis_title="月份", yaxis_title="金額", barmode="group")
+            st.plotly_chart(fig1, use_container_width=True)
+
+            stock_options = df_chart[["股號", "股名"]].dropna(subset=["股號"]).drop_duplicates()
+            if not stock_options.empty:
+                stock_options["_顯示名稱"] = (
+                    stock_options["股號"].astype(str)
+                    + " "
+                    + stock_options["股名"].fillna("").astype(str)
+                ).str.strip()
+                selected_stock = st.selectbox("選擇個股", stock_options["_顯示名稱"].tolist())
+                selected_id = stock_options.loc[
+                    stock_options["_顯示名稱"] == selected_stock, "股號"
+                ].iloc[0]
+                df_single = df_chart[df_chart["股號"].astype(str) == str(selected_id)]
+                single_buy = (
+                    df_single.dropna(subset=["_買入月份"])
+                    .groupby("_買入月份")["實際買股花費金額"]
+                    .sum()
+                    .rename("實際買入金額")
+                )
+                single_sell = (
+                    df_single.dropna(subset=["_賣出月份"])
+                    .groupby("_賣出月份")["實際賣股所得金額"]
+                    .sum()
+                    .rename("實際賣出金額")
+                )
+                single_monthly = pd.concat([single_buy, single_sell], axis=1).fillna(0).sort_index()
+                fig2 = go.Figure()
+                fig2.add_trace(go.Scatter(
+                    x=single_monthly.index,
+                    y=single_monthly["實際買入金額"],
+                    mode="lines+markers",
+                    name="實際買入金額",
+                ))
+                fig2.add_trace(go.Scatter(
+                    x=single_monthly.index,
+                    y=single_monthly["實際賣出金額"],
+                    mode="lines+markers",
+                    name="實際賣出金額",
+                ))
+                fig2.update_layout(
+                    title=f"個股每月買賣金額（{selected_stock}）",
+                    xaxis_title="月份",
+                    yaxis_title="金額",
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+    else:
+        st.info("新增交易資料後，這裡會顯示每月及個股買賣統計圖表。")
