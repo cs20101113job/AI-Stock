@@ -53,7 +53,10 @@ if not check_password():
 
 # ==================== 主系統畫面 (登入成功後呈現) ====================
 st.title("📈 股票買賣記錄與即時監控系統")
-st.write(f"📊 系統版本: {app_version}")
+version_number = "v1.2.0"
+update_date = "2026-06-06"
+
+st.write(f"📊 系統版本: {version_number} ({update_date})")
 
 # 側邊欄增加登出按鈕
 with st.sidebar:
