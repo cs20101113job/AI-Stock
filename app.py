@@ -695,6 +695,7 @@ with tab3:
                     y=monthly["當月現金流"],
                     mode="lines+markers",
                     name="當月現金流（賣出 - 買入，非已實現損益）",
+                    marker={"size": 12},
                 ))
                 fig1.update_layout(
                     title="每月實際買賣統計",
@@ -782,13 +783,14 @@ with tab3:
                                 y=single_monthly["實際買入金額"],
                                 mode="lines+markers",
                                 name="實際買入金額",
+                                marker={"size": 12},
                             ))
                             fig2.add_trace(go.Scatter(
                                 x=single_labels,
                                 y=single_monthly["實際賣出金額"],
                                 mode="lines+markers",
                                 name="實際賣出金額",
-                                marker={"color": "green", "symbol": "diamond"},
+                                marker={"color": "green", "symbol": "diamond", "size": 12},
                                 line={"color": "green"},
                             ))
                             fig2.update_layout(
