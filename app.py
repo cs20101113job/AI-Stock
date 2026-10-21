@@ -684,7 +684,12 @@ with tab3:
                 monthly_labels = monthly.index.astype(str).tolist()
                 fig1 = go.Figure()
                 fig1.add_trace(go.Bar(x=monthly_labels, y=monthly["實際買入金額"], name="實際買入金額"))
-                fig1.add_trace(go.Bar(x=monthly_labels, y=monthly["實際賣出金額"], name="實際賣出金額"))
+                fig1.add_trace(go.Bar(
+                    x=monthly_labels,
+                    y=monthly["實際賣出金額"],
+                    name="實際賣出金額",
+                    marker_color="green",
+                ))
                 fig1.add_trace(go.Scatter(
                     x=monthly_labels,
                     y=monthly["當月現金流"],
@@ -783,6 +788,8 @@ with tab3:
                                 y=single_monthly["實際賣出金額"],
                                 mode="lines+markers",
                                 name="實際賣出金額",
+                                marker={"color": "green", "symbol": "diamond"},
+                                line={"color": "green"},
                             ))
                             fig2.update_layout(
                                 title=f"個股每月買賣金額（{selected_stock}）",
