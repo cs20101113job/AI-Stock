@@ -3,9 +3,7 @@ import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import requests
-import subprocess
 from datetime import datetime
-from pathlib import Path
 
 SHEET_COLUMNS = [
     "股號", "股名", "類股", "種類", "交易狀態",
@@ -58,28 +56,8 @@ if not check_password():
 st.title("📈 股票買賣記錄與即時監控系統")
 
 
-def get_version_info():
-    repository = Path(__file__).resolve().parent
-    commit_count = subprocess.run(
-        ["git", "rev-list", "--count", "HEAD"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    update_date = subprocess.run(
-        ["git", "log", "-1", "--format=%cs"],
-        cwd=repository,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-    return f"v1.2.{int(commit_count)}", update_date
-
-
-version_number, update_date = get_version_info()
-
-st.write(f"📊 系統版本: {version_number} ({update_date})")
+version_number = "20261021. CS. V1.0 最終版"
+st.write(f"📊 系統版本: {version_number}")
 
 # 側邊欄增加登出按鈕
 with st.sidebar:
