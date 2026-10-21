@@ -726,27 +726,71 @@ with tab3:
                         .rename("實際賣出金額")
                     )
                     single_monthly = pd.concat([single_buy, single_sell], axis=1).fillna(0).sort_index()
-                    single_labels = single_monthly.index.astype(str).tolist()
-                    fig2 = go.Figure()
-                    fig2.add_trace(go.Scatter(
-                        x=single_labels,
-                        y=single_monthly["實際買入金額"],
-                        mode="lines+markers",
-                        name="實際買入金額",
-                    ))
-                    fig2.add_trace(go.Scatter(
-                        x=single_labels,
-                        y=single_monthly["實際賣出金額"],
-                        mode="lines+markers",
-                        name="實際賣出金額",
-                    ))
-                    fig2.update_layout(
-                        title=f"個股每月買賣金額（{selected_stock}）",
-                        xaxis_title="月份",
-                        yaxis_title="金額",
-                        xaxis={"type": "category"},
-                        yaxis={"range": y_range},
-                    )
-                    st.plotly_chart(fig2, use_container_width=True)
+                    if single_monthly.empty:
+                        st.info("這檔股票尚無有效交易日期，無法繪製個股月圖。")
+                    else:
+                        st.markdown("### 個股圖表 Y 軸範圍")
+                        single_chart_values = single_monthly[
+                            ["實際買入金額", "實際賣出金額"]
+                        ].to_numpy(dtype=float)
+                        single_data_min = min(0.0, float(single_chart_values.min()))
+                        single_data_max = max(0.0, float(single_chart_values.max()))
+                        single_padding = max(
+                            (single_data_max - single_data_min) * 0.1, 1.0
+                        )
+                        single_default_y_min = single_data_min - single_padding
+                        single_default_y_max = single_data_max + single_padding
+                        single_chart_key = str(selected_id).replace(".", "_")
+                        custom_single_y_range = st.checkbox(
+                            "自訂個股圖表 Y 軸上下限",
+                            key=f"custom_single_y_range_{single_chart_key}",
+                        )
+                        single_y_range = None
+                        if custom_single_y_range:
+                            single_y_min_col, single_y_max_col = st.columns(2)
+                            with single_y_min_col:
+                                single_y_min = st.number_input(
+                                    "個股圖表 Y 軸下限",
+                                    value=single_default_y_min,
+                                    step=max(single_padding, 1.0),
+                                    format="%.2f",
+                                    key=f"single_y_min_{single_chart_key}",
+                                )
+                            with single_y_max_col:
+                                single_y_max = st.number_input(
+                                    "個股圖表 Y 軸上限",
+                                    value=single_default_y_max,
+                                    step=max(single_padding, 1.0),
+                                    format="%.2f",
+                                    key=f"single_y_max_{single_chart_key}",
+                                )
+                            if single_y_min >= single_y_max:
+                                st.error("個股圖表 Y 軸下限必須小於上限。")
+                            else:
+                                single_y_range = [single_y_min, single_y_max]
+
+                        if not custom_single_y_range or single_y_range is not None:
+                            single_labels = single_monthly.index.astype(str).tolist()
+                            fig2 = go.Figure()
+                            fig2.add_trace(go.Scatter(
+                                x=single_labels,
+                                y=single_monthly["實際買入金額"],
+                                mode="lines+markers",
+                                name="實際買入金額",
+                            ))
+                            fig2.add_trace(go.Scatter(
+                                x=single_labels,
+                                y=single_monthly["實際賣出金額"],
+                                mode="lines+markers",
+                                name="實際賣出金額",
+                            ))
+                            fig2.update_layout(
+                                title=f"個股每月買賣金額（{selected_stock}）",
+                                xaxis_title="月份",
+                                yaxis_title="金額",
+                                xaxis={"type": "category"},
+                                yaxis={"range": single_y_range},
+                            )
+                            st.plotly_chart(fig2, use_container_width=True)
     else:
         st.info("新增交易資料後，這裡會顯示每月及個股買賣統計圖表。")
