@@ -13,7 +13,7 @@ SHEET_COLUMNS = [
     "實際買股日期", "實際買股金額", "實際買股數量", "實際買股花費金額", "買股手續費",
     "預計賣股金額", "預計賣股數量", "預計賣股所得金額",
     "實際賣股日期", "實際賣股金額", "實際賣股數量", "實際賣股所得金額", "賣股手續費",
-    "英文股名",
+    "英文股名", "當天收盤價／現價",
 ]
 
 # ==================== 頁面設定 ====================
@@ -366,7 +366,7 @@ tab1, tab2, tab3 = st.tabs(["📝 新增買賣紀錄", "📊 買賣紀錄表與�
 with tab1:
     st.subheader("新增買賣交易數據")
     
-    col_basic1, col_basic2, col_basic3, col_basic4 = st.columns(4)
+    col_basic1, col_basic2, col_basic3, col_basic4, col_basic5 = st.columns(5)
     with col_basic1:
         stock_id = st.text_input("股號 (例如: 2330)", "2330")
     
@@ -384,6 +384,12 @@ with tab1:
         category = st.text_input("類股 (例如: 電子股)", "電子股")
     with col_basic4:
         sub_category = st.text_input("種類 (例如: 晶圓代工)", "晶圓代工")
+    with col_basic5:
+        st.text_input(
+            "當天收盤價／現價",
+            value=f"{current_price:,.2f}" if current_price is not None else "暫無報價",
+            disabled=True,
+        )
 
     st.markdown("---")
     
@@ -430,7 +436,7 @@ with tab1:
             r_buy_date, r_buy_price, r_buy_qty, r_buy_total, r_buy_fee,
             p_sell_price, p_sell_qty, p_sell_total,
             r_sell_date, r_sell_price, r_sell_qty, r_sell_total, r_sell_fee,
-            stock_english_name,
+            stock_english_name, current_price if current_price is not None else "",
         ]
         if save_to_google_sheet(new_row):
             st.success("成功寫入 Google Sheet！")
@@ -508,61 +514,104 @@ with tab3:
         else:
             monthly["當月現金流"] = monthly["實際賣出金額"] - monthly["實際買入金額"]
             st.markdown("### 每月實際買賣金額")
-            fig1 = go.Figure()
-            fig1.add_trace(go.Bar(x=monthly.index, y=monthly["實際買入金額"], name="實際買入金額"))
-            fig1.add_trace(go.Bar(x=monthly.index, y=monthly["實際賣出金額"], name="實際賣出金額"))
-            fig1.add_trace(go.Scatter(
-                x=monthly.index,
-                y=monthly["當月現金流"],
-                mode="lines+markers",
-                name="當月現金流（賣出 - 買入，非已實現損益）",
-            ))
-            fig1.update_layout(title="每月實際買賣統計", xaxis_title="月份", yaxis_title="金額", barmode="group")
-            st.plotly_chart(fig1, use_container_width=True)
+            chart_values = monthly[
+                ["實際買入金額", "實際賣出金額", "當月現金流"]
+            ].to_numpy(dtype=float)
+            data_min = min(0.0, float(chart_values.min()))
+            data_max = max(0.0, float(chart_values.max()))
+            padding = max((data_max - data_min) * 0.1, 1.0)
+            default_y_min = data_min - padding
+            default_y_max = data_max + padding
+            custom_y_range = st.checkbox("自訂圖表 Y 軸上下限")
+            y_range = None
+            if custom_y_range:
+                y_min_col, y_max_col = st.columns(2)
+                with y_min_col:
+                    y_min = st.number_input(
+                        "Y 軸下限",
+                        value=default_y_min,
+                        step=max(padding, 1.0),
+                        format="%.2f",
+                    )
+                with y_max_col:
+                    y_max = st.number_input(
+                        "Y 軸上限",
+                        value=default_y_max,
+                        step=max(padding, 1.0),
+                        format="%.2f",
+                    )
+                if y_min >= y_max:
+                    st.error("Y 軸下限必須小於上限。")
+                else:
+                    y_range = [y_min, y_max]
 
-            stock_options = df_chart[["股號", "股名"]].dropna(subset=["股號"]).drop_duplicates()
-            if not stock_options.empty:
-                stock_options["_顯示名稱"] = (
-                    stock_options["股號"].astype(str)
-                    + " "
-                    + stock_options["股名"].fillna("").astype(str)
-                ).str.strip()
-                selected_stock = st.selectbox("選擇個股", stock_options["_顯示名稱"].tolist())
-                selected_id = stock_options.loc[
-                    stock_options["_顯示名稱"] == selected_stock, "股號"
-                ].iloc[0]
-                df_single = df_chart[df_chart["股號"].astype(str) == str(selected_id)]
-                single_buy = (
-                    df_single.dropna(subset=["_買入月份"])
-                    .groupby("_買入月份")["實際買股花費金額"]
-                    .sum()
-                    .rename("實際買入金額")
-                )
-                single_sell = (
-                    df_single.dropna(subset=["_賣出月份"])
-                    .groupby("_賣出月份")["實際賣股所得金額"]
-                    .sum()
-                    .rename("實際賣出金額")
-                )
-                single_monthly = pd.concat([single_buy, single_sell], axis=1).fillna(0).sort_index()
-                fig2 = go.Figure()
-                fig2.add_trace(go.Scatter(
-                    x=single_monthly.index,
-                    y=single_monthly["實際買入金額"],
+            if not custom_y_range or y_range is not None:
+                monthly_labels = monthly.index.astype(str).tolist()
+                fig1 = go.Figure()
+                fig1.add_trace(go.Bar(x=monthly_labels, y=monthly["實際買入金額"], name="實際買入金額"))
+                fig1.add_trace(go.Bar(x=monthly_labels, y=monthly["實際賣出金額"], name="實際賣出金額"))
+                fig1.add_trace(go.Scatter(
+                    x=monthly_labels,
+                    y=monthly["當月現金流"],
                     mode="lines+markers",
-                    name="實際買入金額",
+                    name="當月現金流（賣出 - 買入，非已實現損益）",
                 ))
-                fig2.add_trace(go.Scatter(
-                    x=single_monthly.index,
-                    y=single_monthly["實際賣出金額"],
-                    mode="lines+markers",
-                    name="實際賣出金額",
-                ))
-                fig2.update_layout(
-                    title=f"個股每月買賣金額（{selected_stock}）",
+                fig1.update_layout(
+                    title="每月實際買賣統計",
                     xaxis_title="月份",
                     yaxis_title="金額",
+                    barmode="group",
+                    xaxis={"type": "category"},
+                    yaxis={"range": y_range},
                 )
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig1, use_container_width=True)
+
+                stock_options = df_chart[["股號", "股名"]].dropna(subset=["股號"]).drop_duplicates()
+                if not stock_options.empty:
+                    stock_options["_顯示名稱"] = (
+                        stock_options["股號"].astype(str)
+                        + " "
+                        + stock_options["股名"].fillna("").astype(str)
+                    ).str.strip()
+                    selected_stock = st.selectbox("選擇個股", stock_options["_顯示名稱"].tolist())
+                    selected_id = stock_options.loc[
+                        stock_options["_顯示名稱"] == selected_stock, "股號"
+                    ].iloc[0]
+                    df_single = df_chart[df_chart["股號"].astype(str) == str(selected_id)]
+                    single_buy = (
+                        df_single.dropna(subset=["_買入月份"])
+                        .groupby("_買入月份")["實際買股花費金額"]
+                        .sum()
+                        .rename("實際買入金額")
+                    )
+                    single_sell = (
+                        df_single.dropna(subset=["_賣出月份"])
+                        .groupby("_賣出月份")["實際賣股所得金額"]
+                        .sum()
+                        .rename("實際賣出金額")
+                    )
+                    single_monthly = pd.concat([single_buy, single_sell], axis=1).fillna(0).sort_index()
+                    single_labels = single_monthly.index.astype(str).tolist()
+                    fig2 = go.Figure()
+                    fig2.add_trace(go.Scatter(
+                        x=single_labels,
+                        y=single_monthly["實際買入金額"],
+                        mode="lines+markers",
+                        name="實際買入金額",
+                    ))
+                    fig2.add_trace(go.Scatter(
+                        x=single_labels,
+                        y=single_monthly["實際賣出金額"],
+                        mode="lines+markers",
+                        name="實際賣出金額",
+                    ))
+                    fig2.update_layout(
+                        title=f"個股每月買賣金額（{selected_stock}）",
+                        xaxis_title="月份",
+                        yaxis_title="金額",
+                        xaxis={"type": "category"},
+                        yaxis={"range": y_range},
+                    )
+                    st.plotly_chart(fig2, use_container_width=True)
     else:
         st.info("新增交易資料後，這裡會顯示每月及個股買賣統計圖表。")
