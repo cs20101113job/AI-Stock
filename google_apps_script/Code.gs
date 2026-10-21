@@ -25,6 +25,11 @@ var SHEET_HEADERS = [
 ];
 
 var SHEET_NAME = "股票買買";
+var MONITOR_TIME_ZONE = "Asia/Taipei";
+var MONITOR_TRIGGER_FUNCTION = "monitorStockPrices";
+var MONITOR_MAX_ALERTS_PER_CONDITION = 5;
+var HOLIDAY_API_URL = "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule";
+var QUOTE_API_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp";
 
 function getSheet_() {
   var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
@@ -168,5 +173,257 @@ function doPost(e) {
     return jsonOutput_({ result: "success" });
   } catch (error) {
     return jsonOutput_({ result: "error", message: error.toString() });
+  }
+}
+
+function installPriceMonitor() {
+  var properties = PropertiesService.getScriptProperties();
+  if (!properties.getProperty("TELEGRAM_BOT_TOKEN") ||
+      !properties.getProperty("TELEGRAM_CHAT_ID")) {
+    throw new Error(
+      "請先在 Apps Script 指令碼屬性設定 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID。"
+    );
+  }
+
+  var triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === MONITOR_TRIGGER_FUNCTION) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+  ScriptApp.newTrigger(MONITOR_TRIGGER_FUNCTION)
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+}
+
+function removePriceMonitor() {
+  ScriptApp.getProjectTriggers().forEach(function (trigger) {
+    if (trigger.getHandlerFunction() === MONITOR_TRIGGER_FUNCTION) {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+}
+
+function monitorStockPrices() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    console.log("Previous price-monitor run is still active; skipping this run.");
+    return;
+  }
+
+  try {
+    var now = new Date();
+    var localTime = Utilities.formatDate(now, MONITOR_TIME_ZONE, "HH:mm");
+    var localDate = Utilities.formatDate(now, MONITOR_TIME_ZONE, "yyyyMMdd");
+    var dayOfWeek = Number(Utilities.formatDate(now, MONITOR_TIME_ZONE, "u"));
+    if (dayOfWeek > 5 || localTime < "09:00" || localTime > "13:30") {
+      return;
+    }
+    if (getTaiwanMarketHolidays_().indexOf(localDate) !== -1) {
+      console.log("Taiwan market is closed today; skipping price monitoring.");
+      return;
+    }
+
+    var sheet = getSheet_();
+    ensureHeaders_(sheet);
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return;
+    }
+
+    var values = sheet.getRange(1, 1, lastRow, sheet.getLastColumn()).getValues();
+    var headerIndexes = {};
+    values[0].forEach(function (header, index) {
+      headerIndexes[String(header).trim()] = index;
+    });
+    ["股號", "預計買股金額", "預計賣股金額"].forEach(function (header) {
+      if (headerIndexes[header] === undefined) {
+        throw new Error('工作表缺少必要欄位「' + header + '」。');
+      }
+    });
+
+    var quoteCache = {};
+    for (var rowIndex = 1; rowIndex < values.length; rowIndex++) {
+      var row = values[rowIndex];
+      var stockId = String(row[headerIndexes["股號"]] || "").trim().replace(/\.0$/, "");
+      if (!stockId) {
+        continue;
+      }
+      if (!/^\d{1,6}$/.test(stockId)) {
+        throw new Error("無效的台股代號，第 " + (rowIndex + 1) + " 列：" + stockId);
+      }
+      if (!Object.prototype.hasOwnProperty.call(quoteCache, stockId)) {
+        quoteCache[stockId] = getTaiwanStockPrice_(stockId, localDate);
+      }
+
+      var marketPrice = quoteCache[stockId];
+      if (marketPrice === null) {
+        console.log("No current-session quote for stock " + stockId + "; skipping alerts.");
+        continue;
+      }
+
+      var stockName = headerIndexes["股名"] === undefined
+        ? stockId
+        : String(row[headerIndexes["股名"]] || stockId);
+      var buyPrice = parseMonitorPrice_(row[headerIndexes["預計買股金額"]]);
+      var sellPrice = parseMonitorPrice_(row[headerIndexes["預計賣股金額"]]);
+      var rowNumber = rowIndex + 1;
+      var buyAlertKey = getMonitorAlertCountKey_(
+        sheet, rowNumber, stockId, "buy", buyPrice
+      );
+      var sellAlertKey = getMonitorAlertCountKey_(
+        sheet, rowNumber, stockId, "sell", sellPrice
+      );
+      var buyConditionMet = buyPrice > 0 && marketPrice <= buyPrice;
+      var sellConditionMet = sellPrice > 0 && marketPrice >= sellPrice;
+
+      if (buyConditionMet) {
+        sendMonitorAlertUpToLimit_(
+          buyAlertKey,
+          "🟢 【買入警報】" + stockName + "(" + stockId + ")" +
+          "\n當前股價: " + marketPrice +
+          "\n已達到預計買入價: " + buyPrice
+        );
+      } else {
+        PropertiesService.getScriptProperties().deleteProperty(buyAlertKey);
+      }
+      if (sellConditionMet) {
+        sendMonitorAlertUpToLimit_(
+          sellAlertKey,
+          "🔴 【賣出警報】" + stockName + "(" + stockId + ")" +
+          "\n當前股價: " + marketPrice +
+          "\n已達到預計賣出價: " + sellPrice
+        );
+      } else {
+        PropertiesService.getScriptProperties().deleteProperty(sellAlertKey);
+      }
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function getMonitorAlertCountKey_(sheet, rowNumber, stockId, direction, targetPrice) {
+  return "monitor_alert_count_" + [
+    SpreadsheetApp.getActiveSpreadsheet().getId(),
+    sheet.getSheetId(),
+    rowNumber,
+    stockId,
+    direction,
+    targetPrice
+  ].join("_");
+}
+
+function sendMonitorAlertUpToLimit_(key, message) {
+  var properties = PropertiesService.getScriptProperties();
+  var count = Number(properties.getProperty(key) || 0);
+  if (count >= MONITOR_MAX_ALERTS_PER_CONDITION) {
+    return;
+  }
+
+  sendMonitorTelegram_(message);
+  properties.setProperty(key, String(count + 1));
+}
+
+function getTaiwanMarketHolidays_() {
+  var cache = CacheService.getScriptCache();
+  var cachedHolidays = cache.get("twse_market_holidays");
+  if (cachedHolidays) {
+    return JSON.parse(cachedHolidays);
+  }
+
+  var response = UrlFetchApp.fetch(HOLIDAY_API_URL, { muteHttpExceptions: true });
+  if (response.getResponseCode() !== 200) {
+    throw new Error("讀取證交所休市日失敗，HTTP " + response.getResponseCode());
+  }
+  var entries = JSON.parse(response.getContentText());
+  if (!Array.isArray(entries)) {
+    throw new Error("證交所休市日 API 回傳格式錯誤。");
+  }
+
+  var currentYear = Number(Utilities.formatDate(new Date(), MONITOR_TIME_ZONE, "yyyy"));
+  var foundCurrentYear = false;
+  var holidays = [];
+  entries.forEach(function (entry) {
+    var match = String(entry.Date || "").match(/^(\d{3})(\d{2})(\d{2})$/);
+    if (!match) {
+      return;
+    }
+    var date = String(Number(match[1]) + 1911) + match[2] + match[3];
+    if (Number(date.slice(0, 4)) === currentYear) {
+      foundCurrentYear = true;
+    }
+    var description = String(entry.Description || "");
+    var name = String(entry.Name || "");
+    if (description.indexOf("放假") !== -1 || name.indexOf("市場無交易") !== -1) {
+      holidays.push(date);
+    }
+  });
+  if (!foundCurrentYear) {
+    throw new Error("證交所休市日 API 未提供今年資料，為避免休市日誤報，已停止本次監控。");
+  }
+
+  cache.put("twse_market_holidays", JSON.stringify(holidays), 21600);
+  return holidays;
+}
+
+function getTaiwanStockPrice_(stockId, localDate) {
+  var exchangeCodes = ["tse_", "otc_"].map(function (exchange) {
+    return exchange + stockId + ".tw";
+  });
+  var url = QUOTE_API_URL +
+    "?ex_ch=" + encodeURIComponent(exchangeCodes.join("|")) +
+    "&json=1&delay=0";
+  var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  if (response.getResponseCode() !== 200) {
+    throw new Error(
+      "讀取台股行情失敗（" + stockId + "），HTTP " + response.getResponseCode()
+    );
+  }
+  var payload = JSON.parse(response.getContentText());
+  var quotes = payload.msgArray || [];
+  for (var i = 0; i < quotes.length; i++) {
+    if (quotes[i].d !== localDate || !quotes[i].z || quotes[i].z === "-") {
+      continue;
+    }
+    var price = Number(quotes[i].z);
+    if (isFinite(price) && price > 0) {
+      return price;
+    }
+  }
+  return null;
+}
+
+function parseMonitorPrice_(value) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return 0;
+  }
+  var price = Number(String(value).replace(/,/g, "").trim());
+  return isFinite(price) ? price : 0;
+}
+
+function sendMonitorTelegram_(message) {
+  var properties = PropertiesService.getScriptProperties();
+  var token = properties.getProperty("TELEGRAM_BOT_TOKEN");
+  var chatId = properties.getProperty("TELEGRAM_CHAT_ID");
+  if (!token || !chatId) {
+    throw new Error(
+      "請在 Apps Script 指令碼屬性設定 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID。"
+    );
+  }
+
+  var response = UrlFetchApp.fetch(
+    "https://api.telegram.org/bot" + token + "/sendMessage",
+    {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify({ chat_id: chatId, text: message }),
+      muteHttpExceptions: true
+    }
+  );
+  var result = JSON.parse(response.getContentText());
+  if (response.getResponseCode() < 200 || response.getResponseCode() >= 300 || !result.ok) {
+    throw new Error("Telegram 通知發送失敗：" + (result.description || response.getResponseCode()));
   }
 }
