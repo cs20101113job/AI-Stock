@@ -23,8 +23,20 @@ var SHEET_HEADERS = [
   "英文股名"
 ];
 
+var SHEET_NAME = "股票買買";
+
 function getSheet_() {
-  return SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = spreadsheet.getSheetByName(SHEET_NAME);
+  if (!sheet) {
+    var availableNames = spreadsheet.getSheets().map(function (item) {
+      return item.getName();
+    });
+    throw new Error(
+      '找不到工作表「' + SHEET_NAME + '」。目前工作表：' + availableNames.join("、")
+    );
+  }
+  return sheet;
 }
 
 function ensureHeaders_(sheet) {
