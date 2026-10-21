@@ -133,6 +133,7 @@ function doGet() {
     SHEET_HEADERS.forEach(function (header, index) {
       record[header] = row[index] === undefined ? "" : row[index];
     });
+    record._sheet_row = i + 1;
     result.push(record);
   }
 
@@ -168,7 +169,31 @@ function doPost(e) {
     } else {
       throw new Error("row must be an array or object.");
     }
-    sheet.appendRow(rowData);
+
+    if (contents.action === "update") {
+      var rowNumber = Number(contents.rowNumber);
+      if (!Number.isInteger(rowNumber) || rowNumber < 2 || rowNumber > sheet.getLastRow()) {
+        throw new Error("Invalid row number for updating a trade.");
+      }
+      var stockIdColumn = SHEET_HEADERS.indexOf("股號") + 1;
+      var existingStockId = String(
+        sheet.getRange(rowNumber, stockIdColumn).getDisplayValue()
+      ).trim().replace(/\.0$/, "");
+      var expectedStockId = String(contents.expectedStockId || "").trim().replace(/\.0$/, "");
+      if (!expectedStockId || existingStockId !== expectedStockId) {
+        throw new Error("The selected trade changed in Google Sheet. Reload before updating.");
+      }
+      var statusColumn = SHEET_HEADERS.indexOf("交易狀態") + 1;
+      var existingStatus = String(
+        sheet.getRange(rowNumber, statusColumn).getDisplayValue()
+      ).trim();
+      if (contents.expectedStatus && existingStatus !== contents.expectedStatus) {
+        throw new Error("The selected trade status changed in Google Sheet. Reload before updating.");
+      }
+      sheet.getRange(rowNumber, 1, 1, SHEET_HEADERS.length).setValues([rowData]);
+    } else {
+      sheet.appendRow(rowData);
+    }
 
     return jsonOutput_({ result: "success" });
   } catch (error) {

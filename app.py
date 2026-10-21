@@ -220,11 +220,22 @@ def load_data():
         st.error(f"連線至 Google Apps Script 失敗: {e}")
         return pd.DataFrame()
 
-def save_to_google_sheet(row_data):
+def save_to_google_sheet(
+    row_data, row_number=None, expected_stock_id=None, expected_status=None
+):
+    payload = {"headers": SHEET_COLUMNS, "row": row_data}
+    if row_number is not None:
+        payload.update({
+            "action": "update",
+            "rowNumber": row_number,
+            "expectedStockId": expected_stock_id,
+            "expectedStatus": expected_status,
+        })
+
     try:
         response = requests.post(
             GAS_WEB_APP_URL,
-            json={"headers": SHEET_COLUMNS, "row": row_data},
+            json=payload,
             timeout=15,
         )
         if response.status_code == 200 and response.json().get("result") == "success":
@@ -343,10 +354,111 @@ tab1, tab2, tab3 = st.tabs(["📝 新增買賣紀錄", "📊 買賣紀錄表與�
 # -------------------- TAB 1: 輸入表單 --------------------
 with tab1:
     st.subheader("新增買賣交易數據")
-    
+
+    open_trades = pd.DataFrame()
+    if not df.empty and {"交易狀態", "_sheet_row"}.issubset(df.columns):
+        open_trades = df[
+            df["交易狀態"].astype(str).str.strip().eq("進行中")
+            & pd.to_numeric(df["_sheet_row"], errors="coerce").notna()
+        ].copy()
+
+    trade_options = [0] + (
+        pd.to_numeric(open_trades["_sheet_row"], errors="raise").astype(int).tolist()
+        if not open_trades.empty
+        else []
+    )
+    pending_trade_row = st.session_state.pop("pending_open_trade", None)
+    if pending_trade_row in trade_options:
+        st.session_state["selected_open_trade"] = pending_trade_row
+    if st.session_state.get("selected_open_trade", 0) not in trade_options:
+        st.session_state["selected_open_trade"] = 0
+    if "_loaded_open_trade" not in st.session_state:
+        st.session_state["_loaded_open_trade"] = None
+
+    def trade_option_label(row_number):
+        if row_number == 0:
+            return "新增空白交易"
+        record = open_trades.loc[
+            pd.to_numeric(open_trades["_sheet_row"], errors="coerce").eq(row_number)
+        ].iloc[0]
+        stock_id_label = str(record.get("股號", "")).strip()
+        stock_name_label = str(record.get("股名", "")).strip()
+        return f"{stock_id_label} {stock_name_label}（進行中，第 {row_number} 列）".strip()
+
+    selected_trade_row = st.selectbox(
+        "載入進行中交易",
+        options=trade_options,
+        format_func=trade_option_label,
+        key="selected_open_trade",
+    )
+
+    def form_number(value, default=0):
+        parsed = pd.to_numeric(value, errors="coerce")
+        return default if pd.isna(parsed) else float(parsed)
+
+    def form_text(value):
+        return "" if pd.isna(value) else str(value)
+
+    def form_date(value, default_today=True):
+        if pd.isna(value) or str(value).strip() == "":
+            return datetime.now().strftime("%Y%m%d") if default_today else ""
+        parsed = parse_trade_dates(pd.Series([value])).iloc[0]
+        return parsed.strftime("%Y%m%d") if pd.notna(parsed) else str(value)
+
+    if selected_trade_row != st.session_state["_loaded_open_trade"]:
+        if selected_trade_row == 0:
+            st.session_state.update({
+                "form_stock_id": "2330",
+                "form_category": "電子股",
+                "form_sub_category": "晶圓代工",
+                "form_p_buy_price": 0.0,
+                "form_p_buy_qty": 0,
+                "form_r_buy_date": datetime.now().strftime("%Y%m%d"),
+                "form_r_buy_price": 0.0,
+                "form_r_buy_qty": 0,
+                "form_r_buy_fee": 0,
+                "form_p_sell_price": 0.0,
+                "form_p_sell_qty": 0,
+                "form_r_sell_date": datetime.now().strftime("%Y%m%d"),
+                "form_r_sell_price": 0.0,
+                "form_r_sell_qty": 0,
+                "form_r_sell_fee": 0,
+            })
+        else:
+            selected_record = open_trades.loc[
+                pd.to_numeric(open_trades["_sheet_row"], errors="coerce").eq(
+                    selected_trade_row
+                )
+            ].iloc[0]
+            st.session_state.update({
+                "form_stock_id": str(selected_record.get("股號", "")).strip(),
+                "form_category": form_text(selected_record.get("類股", "")),
+                "form_sub_category": form_text(selected_record.get("種類", "")),
+                "form_p_buy_price": form_number(selected_record.get("預計買股金額")),
+                "form_p_buy_qty": int(form_number(selected_record.get("預計買股數量"))),
+                "form_r_buy_date": form_date(
+                    selected_record.get("實際買股日期"), default_today=False
+                ),
+                "form_r_buy_price": form_number(selected_record.get("實際買股金額")),
+                "form_r_buy_qty": int(form_number(selected_record.get("實際買股數量"))),
+                "form_r_buy_fee": int(form_number(selected_record.get("買股手續費"))),
+                "form_p_sell_price": form_number(selected_record.get("預計賣股金額")),
+                "form_p_sell_qty": int(form_number(selected_record.get("預計賣股數量"))),
+                "form_r_sell_date": form_date(
+                    selected_record.get("實際賣股日期"), default_today=False
+                ),
+                "form_r_sell_price": form_number(selected_record.get("實際賣股金額")),
+                "form_r_sell_qty": int(form_number(selected_record.get("實際賣股數量"))),
+                "form_r_sell_fee": int(form_number(selected_record.get("賣股手續費"))),
+            })
+        st.session_state["_loaded_open_trade"] = selected_trade_row
+
+    if not df.empty and "_sheet_row" not in df.columns:
+        st.info("進行中交易載入與更新功能需先部署最新版 Google Apps Script。")
+
     col_basic1, col_basic2, col_basic3, col_basic4, col_basic5 = st.columns(5)
     with col_basic1:
-        stock_id = st.text_input("股號 (例如: 2330)", "2330")
+        stock_id = st.text_input("股號 (例如: 2330)", key="form_stock_id")
     
     stock_chinese_name, stock_english_name, current_price = (
         get_stock_info(stock_id) if stock_id else ("-", "-", None)
@@ -359,9 +471,9 @@ with tab1:
         st.text_input("中文股名", value=stock_chinese_name, disabled=True)
         st.text_input("英文股名", value=stock_english_name, disabled=True)
     with col_basic3:
-        category = st.text_input("類股 (例如: 電子股)", "電子股")
+        category = st.text_input("類股 (例如: 電子股)", key="form_category")
     with col_basic4:
-        sub_category = st.text_input("種類 (例如: 晶圓代工)", "晶圓代工")
+        sub_category = st.text_input("種類 (例如: 晶圓代工)", key="form_sub_category")
     with col_basic5:
         st.text_input(
             "當天收盤價／現價",
@@ -375,31 +487,31 @@ with tab1:
     
     with c1:
         st.markdown("### 一、預計買股")
-        p_buy_price = st.number_input("預計買股金額", value=0.0, step=0.5)
-        p_buy_qty = st.number_input("預計買股數量", value=0, step=1000)
+        p_buy_price = st.number_input("預計買股金額", step=0.5, key="form_p_buy_price")
+        p_buy_qty = st.number_input("預計買股數量", step=1000, key="form_p_buy_qty")
         p_buy_total = p_buy_price * p_buy_qty
         st.info(f"預計買股花費金額：{p_buy_total:,.0f}")
 
         st.markdown("### 二、實際買股")
-        r_buy_date = st.text_input("實際買股日期 (YYYYMMDD)", datetime.now().strftime("%Y%m%d"))
-        r_buy_price = st.number_input("實際買股金額", value=0.0, step=0.5)
-        r_buy_qty = st.number_input("實際買股數量", value=0, step=1000)
-        r_buy_fee = st.number_input("買股手續費", value=0, step=10)
+        r_buy_date = st.text_input("實際買股日期 (YYYYMMDD)", key="form_r_buy_date")
+        r_buy_price = st.number_input("實際買股金額", step=0.5, key="form_r_buy_price")
+        r_buy_qty = st.number_input("實際買股數量", step=1000, key="form_r_buy_qty")
+        r_buy_fee = st.number_input("買股手續費", step=10, key="form_r_buy_fee")
         r_buy_total = r_buy_price * r_buy_qty
         st.success(f"實際買股花費金額：{r_buy_total:,.0f}")
 
     with c2:
         st.markdown("### 三、預計賣股")
-        p_sell_price = st.number_input("預計賣股金額", value=0.0, step=0.5)
-        p_sell_qty = st.number_input("預計賣股數量", value=0, step=1000)
+        p_sell_price = st.number_input("預計賣股金額", step=0.5, key="form_p_sell_price")
+        p_sell_qty = st.number_input("預計賣股數量", step=1000, key="form_p_sell_qty")
         p_sell_total = p_sell_price * p_sell_qty
         st.info(f"預計賣股所得金額：{p_sell_total:,.0f}")
 
         st.markdown("### 四、實際賣股")
-        r_sell_date = st.text_input("實際賣股日期 (YYYYMMDD)", datetime.now().strftime("%Y%m%d"))
-        r_sell_price = st.number_input("實際賣股金額", value=0.0, step=0.5)
-        r_sell_qty = st.number_input("實際賣股數量", value=0, step=1000)
-        r_sell_fee = st.number_input("賣股手續費", value=0, step=10)
+        r_sell_date = st.text_input("實際賣股日期 (YYYYMMDD)", key="form_r_sell_date")
+        r_sell_price = st.number_input("實際賣股金額", step=0.5, key="form_r_sell_price")
+        r_sell_qty = st.number_input("實際賣股數量", step=1000, key="form_r_sell_qty")
+        r_sell_fee = st.number_input("賣股手續費", step=10, key="form_r_sell_fee")
         r_sell_total = r_sell_price * r_sell_qty
         st.success(f"實際賣股所得金額：{r_sell_total:,.0f}")
 
@@ -416,15 +528,60 @@ with tab1:
             r_sell_date, r_sell_price, r_sell_qty, r_sell_total, r_sell_fee,
             stock_english_name, current_price if current_price is not None else "",
         ]
-        if save_to_google_sheet(new_row):
-            st.success("成功寫入 Google Sheet！")
+        if save_to_google_sheet(
+            new_row,
+            row_number=selected_trade_row if selected_trade_row else None,
+            expected_stock_id=(
+                str(
+                    open_trades.loc[
+                        pd.to_numeric(open_trades["_sheet_row"], errors="coerce").eq(
+                            selected_trade_row
+                        ),
+                        "股號",
+                    ].iloc[0]
+                ).strip()
+                if selected_trade_row
+                else None
+            ),
+            expected_status="進行中" if selected_trade_row else None,
+        ):
+            st.success(
+                "已更新 Google Sheet 原交易紀錄！"
+                if selected_trade_row
+                else "成功寫入 Google Sheet！"
+            )
             st.rerun()
 
 # -------------------- TAB 2: 資料展示與價格觸發Telegram通知 --------------------
 with tab2:
     st.subheader("📋 股票買賣記錄表")
     if not df.empty:
-        st.dataframe(df, use_container_width=True)
+        status_filter = st.selectbox(
+            "依交易狀態篩選",
+            ["全部", "進行中", "結案"],
+            key="records_status_filter",
+        )
+        displayed_df = df
+        if status_filter != "全部" and "交易狀態" in df.columns:
+            displayed_df = df[
+                df["交易狀態"].astype(str).str.strip().eq(status_filter)
+            ]
+        st.dataframe(
+            displayed_df.drop(columns=["_sheet_row"], errors="ignore"),
+            use_container_width=True,
+        )
+        if not open_trades.empty:
+            selected_open_trade = st.selectbox(
+                "選擇要帶入新增交易表單的進行中紀錄",
+                options=trade_options[1:],
+                format_func=trade_option_label,
+                key="table_open_trade",
+            )
+            if st.button("帶入新增買賣交易數據"):
+                st.session_state["pending_open_trade"] = selected_open_trade
+                st.rerun()
+        elif "交易狀態" in df.columns and df["交易狀態"].astype(str).str.strip().eq("進行中").any():
+            st.info("進行中交易載入功能需先部署最新版 Google Apps Script。")
     else:
         st.warning("目前尚無歷史交易資料。")
 
