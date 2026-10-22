@@ -218,7 +218,7 @@ function installPriceMonitor() {
   });
   ScriptApp.newTrigger(MONITOR_TRIGGER_FUNCTION)
     .timeBased()
-    .everyMinutes(5)
+    .everyMinutes(1)
     .create();
 }
 
@@ -282,13 +282,12 @@ function monitorStockPrices() {
         quoteCache[stockId] = getTaiwanStockPrice_(stockId, localDate);
       }
 
-      var quote = quoteCache[stockId];
-      if (quote === null) {
+      var marketPrice = quoteCache[stockId];
+      if (marketPrice === null) {
         console.log("No current-session quote for stock " + stockId + "; skipping alerts.");
         continue;
       }
 
-      var marketPrice = quote.price;
       var stockName = headerIndexes["股名"] === undefined
         ? stockId
         : String(row[headerIndexes["股名"]] || stockId);
@@ -302,8 +301,8 @@ function monitorStockPrices() {
       var sellAlertKey = getMonitorAlertCountKey_(
         sheet, rowNumber, stockId, "sell", sellPrice
       );
-      var buyConditionMet = buyPrice > 0 && quote.low > 0 && quote.low <= buyPrice;
-      var sellConditionMet = sellPrice > 0 && quote.high > 0 && quote.high >= sellPrice;
+      var buyConditionMet = buyPrice > 0 && marketPrice <= buyPrice;
+      var sellConditionMet = sellPrice > 0 && marketPrice >= sellPrice;
 
       if (actualBuyQuantity > 0) {
         PropertiesService.getScriptProperties().deleteProperty(buyAlertKey);
@@ -311,8 +310,7 @@ function monitorStockPrices() {
         sendMonitorAlertUpToLimit_(
           buyAlertKey,
           "🟢 【買入警報】" + stockName + "(" + stockId + ")" +
-          "\n當前股價: " + (marketPrice === null ? "無最新成交價" : marketPrice) +
-          "\n當日最低價: " + quote.low +
+          "\n當前股價: " + marketPrice +
           "\n已達到預計買入價: " + buyPrice
         );
       } else {
@@ -322,8 +320,7 @@ function monitorStockPrices() {
         sendMonitorAlertUpToLimit_(
           sellAlertKey,
           "🔴 【賣出警報】" + stockName + "(" + stockId + ")" +
-          "\n當前股價: " + (marketPrice === null ? "無最新成交價" : marketPrice) +
-          "\n當日最高價: " + quote.high +
+          "\n當前股價: " + marketPrice +
           "\n已達到預計賣出價: " + sellPrice
         );
       } else {
@@ -419,14 +416,8 @@ function getTaiwanStockPrice_(stockId, localDate) {
       continue;
     }
     var price = parseMonitorPrice_(quotes[i].z);
-    var low = parseMonitorPrice_(quotes[i].l);
-    var high = parseMonitorPrice_(quotes[i].h);
-    if (price > 0 || low > 0 || high > 0) {
-      return {
-        price: price > 0 ? price : null,
-        low: low > 0 ? low : price,
-        high: high > 0 ? high : price
-      };
+    if (price > 0) {
+      return price;
     }
   }
   return null;
