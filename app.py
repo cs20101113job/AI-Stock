@@ -603,14 +603,16 @@ with tab2:
             stock_label = f"{s_chinese_name} / {s_english_name}"
             p_buy_p = pd.to_numeric(row.get("預計買股金額", 0), errors="coerce")
             p_sell_p = pd.to_numeric(row.get("預計賣股金額", 0), errors="coerce")
+            actual_buy_qty = pd.to_numeric(row.get("實際買股數量", 0), errors="coerce")
             p_buy_p = 0 if pd.isna(p_buy_p) else p_buy_p
             p_sell_p = 0 if pd.isna(p_sell_p) else p_sell_p
+            actual_buy_qty = 0 if pd.isna(actual_buy_qty) else actual_buy_qty
 
             if market_p is None:
                 st.warning(f"無法取得 {stock_label}（{s_id}）的 Yahoo 股價。")
                 continue
 
-            if p_buy_p > 0 and market_p <= p_buy_p:
+            if actual_buy_qty <= 0 and p_buy_p > 0 and market_p <= p_buy_p:
                 msg = f"🟢 【買入警報】{stock_label}({s_id})\n當前股價: {market_p}\n已達到預計買入價: {p_buy_p}"
                 sent, result = send_telegram_msg(msg)
                 if sent:

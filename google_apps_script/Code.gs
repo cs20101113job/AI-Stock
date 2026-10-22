@@ -262,7 +262,7 @@ function monitorStockPrices() {
     values[0].forEach(function (header, index) {
       headerIndexes[String(header).trim()] = index;
     });
-    ["股號", "預計買股金額", "預計賣股金額"].forEach(function (header) {
+    ["股號", "預計買股金額", "實際買股數量", "預計賣股金額"].forEach(function (header) {
       if (headerIndexes[header] === undefined) {
         throw new Error('工作表缺少必要欄位「' + header + '」。');
       }
@@ -292,6 +292,7 @@ function monitorStockPrices() {
         ? stockId
         : String(row[headerIndexes["股名"]] || stockId);
       var buyPrice = parseMonitorPrice_(row[headerIndexes["預計買股金額"]]);
+      var actualBuyQuantity = parseMonitorPrice_(row[headerIndexes["實際買股數量"]]);
       var sellPrice = parseMonitorPrice_(row[headerIndexes["預計賣股金額"]]);
       var rowNumber = rowIndex + 1;
       var buyAlertKey = getMonitorAlertCountKey_(
@@ -303,7 +304,9 @@ function monitorStockPrices() {
       var buyConditionMet = buyPrice > 0 && marketPrice <= buyPrice;
       var sellConditionMet = sellPrice > 0 && marketPrice >= sellPrice;
 
-      if (buyConditionMet) {
+      if (actualBuyQuantity > 0) {
+        PropertiesService.getScriptProperties().deleteProperty(buyAlertKey);
+      } else if (buyConditionMet) {
         sendMonitorAlertUpToLimit_(
           buyAlertKey,
           "🟢 【買入警報】" + stockName + "(" + stockId + ")" +
