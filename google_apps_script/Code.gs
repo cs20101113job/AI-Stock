@@ -279,7 +279,14 @@ function monitorStockPrices() {
         throw new Error("無效的台股代號，第 " + (rowIndex + 1) + " 列：" + stockId);
       }
       if (!Object.prototype.hasOwnProperty.call(quoteCache, stockId)) {
-        quoteCache[stockId] = getTaiwanStockPrice_(stockId, localDate);
+        try {
+          quoteCache[stockId] = getTaiwanStockPrice_(stockId, localDate);
+        } catch (error) {
+          console.error(
+            "Failed to fetch quote for stock " + stockId + ": " + error.message
+          );
+          quoteCache[stockId] = null;
+        }
       }
 
       var marketPrice = quoteCache[stockId];
@@ -403,7 +410,13 @@ function getTaiwanStockPrice_(stockId, localDate) {
   var url = QUOTE_API_URL +
     "?ex_ch=" + encodeURIComponent(exchangeCodes.join("|")) +
     "&json=1&delay=0";
-  var response = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+  var response = UrlFetchApp.fetch(url, {
+    headers: {
+      "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw",
+      "User-Agent": "Mozilla/5.0"
+    },
+    muteHttpExceptions: true
+  });
   if (response.getResponseCode() !== 200) {
     throw new Error(
       "讀取台股行情失敗（" + stockId + "），HTTP " + response.getResponseCode()
