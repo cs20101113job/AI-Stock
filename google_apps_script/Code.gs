@@ -416,6 +416,9 @@ function getTaiwanStockPrice_(stockId, localDate) {
       continue;
     }
     var price = parseMonitorPrice_(quotes[i].z);
+    if (price <= 0 && quotes[i].trade) {
+      price = parseMonitorPrice_(quotes[i].trade.z);
+    }
     if (price > 0) {
       return price;
     }
