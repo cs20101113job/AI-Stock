@@ -268,7 +268,8 @@ function monitorStockPrices() {
       }
     });
 
-    var quoteCache = {};
+    var stockIds = [];
+    var stockIdSet = {};
     for (var rowIndex = 1; rowIndex < values.length; rowIndex++) {
       var row = values[rowIndex];
       var stockId = String(row[headerIndexes["股號"]] || "").trim().replace(/\.0$/, "");
@@ -278,15 +279,18 @@ function monitorStockPrices() {
       if (!/^\d{1,6}$/.test(stockId)) {
         throw new Error("無效的台股代號，第 " + (rowIndex + 1) + " 列：" + stockId);
       }
-      if (!Object.prototype.hasOwnProperty.call(quoteCache, stockId)) {
-        try {
-          quoteCache[stockId] = getTaiwanStockPrice_(stockId, localDate);
-        } catch (error) {
-          console.error(
-            "Failed to fetch quote for stock " + stockId + ": " + error.message
-          );
-          quoteCache[stockId] = null;
-        }
+      if (!Object.prototype.hasOwnProperty.call(stockIdSet, stockId)) {
+        stockIdSet[stockId] = true;
+        stockIds.push(stockId);
+      }
+    }
+
+    var quoteCache = getTaiwanStockPrices_(stockIds, localDate);
+    for (var rowIndex = 1; rowIndex < values.length; rowIndex++) {
+      var row = values[rowIndex];
+      var stockId = String(row[headerIndexes["股號"]] || "").trim().replace(/\.0$/, "");
+      if (!stockId) {
+        continue;
       }
 
       var marketPrice = quoteCache[stockId];
@@ -403,40 +407,62 @@ function getTaiwanMarketHolidays_() {
   return holidays;
 }
 
-function getTaiwanStockPrice_(stockId, localDate) {
-  var exchangeCodes = ["tse_", "otc_"].map(function (exchange) {
-    return exchange + stockId + ".tw";
+function getTaiwanStockPrices_(stockIds, localDate) {
+  var prices = {};
+  stockIds.forEach(function (stockId) {
+    prices[stockId] = null;
   });
-  var url = QUOTE_API_URL +
-    "?ex_ch=" + encodeURIComponent(exchangeCodes.join("|")) +
-    "&json=1&delay=0";
-  var response = UrlFetchApp.fetch(url, {
-    headers: {
-      "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw",
-      "User-Agent": "Mozilla/5.0"
-    },
-    muteHttpExceptions: true
-  });
-  if (response.getResponseCode() !== 200) {
-    throw new Error(
-      "讀取台股行情失敗（" + stockId + "），HTTP " + response.getResponseCode()
-    );
+
+  var batchSize = 20;
+  for (var start = 0; start < stockIds.length; start += batchSize) {
+    var batch = stockIds.slice(start, start + batchSize);
+    var batchSet = {};
+    var exchangeCodes = [];
+    batch.forEach(function (stockId) {
+      batchSet[stockId] = true;
+      exchangeCodes.push("tse_" + stockId + ".tw");
+      exchangeCodes.push("otc_" + stockId + ".tw");
+    });
+
+    var url = QUOTE_API_URL +
+      "?ex_ch=" + encodeURIComponent(exchangeCodes.join("|")) +
+      "&json=1&delay=0";
+    try {
+      var response = UrlFetchApp.fetch(url, {
+        headers: {
+          "Referer": "https://mis.twse.com.tw/stock/fibest.jsp?lang=zh_tw",
+          "User-Agent": "Mozilla/5.0"
+        },
+        muteHttpExceptions: true
+      });
+      if (response.getResponseCode() !== 200) {
+        throw new Error("HTTP " + response.getResponseCode());
+      }
+
+      var payload = JSON.parse(response.getContentText());
+      if (!payload.msgArray || !Array.isArray(payload.msgArray)) {
+        throw new Error("行情 API 回傳格式錯誤。");
+      }
+      payload.msgArray.forEach(function (quote) {
+        var stockId = String(quote.c || "").trim();
+        if (!batchSet[stockId] || quote.d !== localDate) {
+          return;
+        }
+        var price = parseMonitorPrice_(quote.z);
+        if (price <= 0 && quote.trade) {
+          price = parseMonitorPrice_(quote.trade.z);
+        }
+        if (price > 0) {
+          prices[stockId] = price;
+        }
+      });
+    } catch (error) {
+      console.error(
+        "Failed to fetch quotes for stocks " + batch.join(", ") + ": " + error.message
+      );
+    }
   }
-  var payload = JSON.parse(response.getContentText());
-  var quotes = payload.msgArray || [];
-  for (var i = 0; i < quotes.length; i++) {
-    if (quotes[i].d !== localDate) {
-      continue;
-    }
-    var price = parseMonitorPrice_(quotes[i].z);
-    if (price <= 0 && quotes[i].trade) {
-      price = parseMonitorPrice_(quotes[i].trade.z);
-    }
-    if (price > 0) {
-      return price;
-    }
-  }
-  return null;
+  return prices;
 }
 
 function parseMonitorPrice_(value) {
