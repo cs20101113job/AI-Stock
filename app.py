@@ -82,7 +82,8 @@ STOCK_REFERENCE_CSV_URL = STOCK_REFERENCE_SHEET_URL.replace(
 )
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+# * 2變更：對照資料快取縮短為 5 分鐘，查無股號時可手動清除快取並重新載入。
+@st.cache_data(ttl=300, show_spinner=False)
 def load_stock_categories():
     response = requests.get(STOCK_REFERENCE_CSV_URL, timeout=15)
     response.raise_for_status()
@@ -531,6 +532,9 @@ with tab1:
             category, sub_category = stock_categories.get(lookup_stock_id, ("", ""))
             if not stock_category_found:
                 st.info(f"對照資料中查無股號「{lookup_stock_id}」的類股與種類。")
+                if st.button("重新載入股號對照資料"):
+                    load_stock_categories.clear()
+                    st.rerun()
 
     stock_chinese_name, stock_english_name, current_price = (
         get_stock_info(stock_id) if stock_id else ("-", "-", None)
