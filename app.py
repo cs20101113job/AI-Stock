@@ -1,9 +1,11 @@
+from datetime import datetime
+from io import StringIO
+
 import streamlit as st
 import pandas as pd
 import yfinance as yf
 import plotly.graph_objects as go
 import requests
-from datetime import datetime
 
 SHEET_COLUMNS = [
     "股號", "股名", "類股", "種類", "交易狀態",
@@ -68,6 +70,51 @@ with st.sidebar:
 
 # ==================== GAS Web App URL 設定 ====================
 GAS_WEB_APP_URL = st.secrets.get("GAS_WEB_APP_URL", "請在此處貼上你的_GAS_WEB_APP_URL")
+STOCK_REFERENCE_CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1DTOV9f3WSzu4sRksO6VpU8zIEU0fVqs_ZWaStEnAYeI/"
+    "export?format=csv&gid=0&range=B:E"
+)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_stock_categories():
+    response = requests.get(STOCK_REFERENCE_CSV_URL, timeout=15)
+    response.raise_for_status()
+    if "text/html" in response.headers.get("Content-Type", "").lower():
+        raise ValueError("試算表回傳登入頁面，請將來源試算表設為知道連結的使用者可檢視。")
+    response.encoding = "utf-8-sig"
+
+    if response.text.lstrip().lower().startswith(("<!doctype html", "<html")):
+        raise ValueError("試算表回傳登入頁面，請將來源試算表設為知道連結的使用者可檢視。")
+
+    reference = pd.read_csv(
+        StringIO(response.text),
+        header=None,
+        dtype=str,
+        keep_default_na=False,
+    )
+    if reference.shape[1] >= 5:
+        reference = reference.iloc[:, 1:5]
+    elif reference.shape[1] != 4:
+        raise ValueError("試算表 B:E 必須依序包含股號、股名、類股、種類。")
+
+    if not reference.empty and str(reference.iloc[0, 0]).strip() in {
+        "股號", "股票代號", "股票代碼", "證券代號", "代號"
+    }:
+        reference = reference.iloc[1:]
+
+    categories = {}
+    for _, row in reference.iterrows():
+        stock_id = str(row.iloc[0]).strip()
+        if stock_id.endswith(".0") and stock_id[:-2].isdigit():
+            stock_id = stock_id[:-2]
+        if stock_id:
+            categories[stock_id] = (
+                str(row.iloc[2]).strip(),
+                str(row.iloc[3]).strip(),
+            )
+    return categories
 
 
 def normalize_sheet_data(data):
@@ -409,8 +456,6 @@ with tab1:
         if selected_trade_row == 0:
             st.session_state.update({
                 "form_stock_id": "2330",
-                "form_category": "電子股",
-                "form_sub_category": "晶圓代工",
                 "form_p_buy_price": 0.0,
                 "form_p_buy_qty": 0,
                 "form_r_buy_date": datetime.now().strftime("%Y%m%d"),
@@ -432,8 +477,6 @@ with tab1:
             ].iloc[0]
             st.session_state.update({
                 "form_stock_id": str(selected_record.get("股號", "")).strip(),
-                "form_category": form_text(selected_record.get("類股", "")),
-                "form_sub_category": form_text(selected_record.get("種類", "")),
                 "form_p_buy_price": form_number(selected_record.get("預計買股金額")),
                 "form_p_buy_qty": int(form_number(selected_record.get("預計買股數量"))),
                 "form_r_buy_date": form_date(
@@ -460,6 +503,30 @@ with tab1:
     with col_basic1:
         stock_id = st.text_input("股號 (例如: 2330)", key="form_stock_id")
     
+    category = ""
+    sub_category = ""
+    stock_reference_error = None
+    stock_category_found = False
+    if stock_id:
+        try:
+            stock_categories = load_stock_categories()
+        except (
+            requests.RequestException,
+            ValueError,
+            pd.errors.ParserError,
+            pd.errors.EmptyDataError,
+        ) as error:
+            stock_reference_error = error
+            st.warning(f"無法讀取股號對照資料：{error}")
+        else:
+            lookup_stock_id = str(stock_id).strip()
+            if lookup_stock_id.endswith(".0") and lookup_stock_id[:-2].isdigit():
+                lookup_stock_id = lookup_stock_id[:-2]
+            stock_category_found = lookup_stock_id in stock_categories
+            category, sub_category = stock_categories.get(lookup_stock_id, ("", ""))
+            if not stock_category_found:
+                st.info(f"對照資料中查無股號「{lookup_stock_id}」的類股與種類。")
+
     stock_chinese_name, stock_english_name, current_price = (
         get_stock_info(stock_id) if stock_id else ("-", "-", None)
     )
@@ -471,9 +538,9 @@ with tab1:
         st.text_input("中文股名", value=stock_chinese_name, disabled=True)
         st.text_input("英文股名", value=stock_english_name, disabled=True)
     with col_basic3:
-        category = st.text_input("類股 (例如: 電子股)", key="form_category")
+        st.text_input("類股", value=category, disabled=True)
     with col_basic4:
-        sub_category = st.text_input("種類 (例如: 晶圓代工)", key="form_sub_category")
+        st.text_input("種類", value=sub_category, disabled=True)
     with col_basic5:
         st.text_input(
             "當天收盤價／現價",
@@ -519,7 +586,10 @@ with tab1:
     status = "結案" if (r_buy_qty == r_sell_qty and r_buy_qty > 0) else "進行中"
     st.write(f"**當前交易狀態：** `{status}`")
 
-    if st.button("💾 儲存並寫入 Google Sheet"):
+    if st.button(
+        "💾 儲存並寫入 Google Sheet",
+        disabled=bool(stock_id and (stock_reference_error or not stock_category_found)),
+    ):
         new_row = [
             stock_id, stock_chinese_name, category, sub_category, status,
             p_buy_price, p_buy_qty, p_buy_total,
