@@ -70,10 +70,15 @@ with st.sidebar:
 
 # ==================== GAS Web App URL 設定 ====================
 GAS_WEB_APP_URL = st.secrets.get("GAS_WEB_APP_URL", "請在此處貼上你的_GAS_WEB_APP_URL")
-STOCK_REFERENCE_CSV_URL = (
+STOCK_REFERENCE_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1DTOV9f3WSzu4sRksO6VpU8zIEU0fVqs_ZWaStEnAYeI/"
-    "export?format=csv&gid=0&range=B:E"
+    "edit?gid=0#gid=0&range=B:E"
+)
+# * 1變更：設定為提供的編輯連結，讀取時轉成 CSV 匯出連結。
+STOCK_REFERENCE_CSV_URL = STOCK_REFERENCE_SHEET_URL.replace(
+    "/edit?gid=0#gid=0&range=B:E",
+    "/export?format=csv&gid=0&range=B:E",
 )
 
 
