@@ -408,7 +408,7 @@ def render_fx_system():
             st.error("ExchangeRate-API 沒有回傳可選擇的外幣匯率。")
             return
         currency_names = {
-            "AUD": "澳幣", "CAD": "加拿大幣", "CHF": "瑞士法郎",
+            "AED": "阿聯酋迪拉姆", "AUD": "澳幣", "CAD": "加拿大幣", "CHF": "瑞士法郎",
             "CNY": "人民幣", "EUR": "歐元", "GBP": "英鎊",
             "HKD": "港幣", "IDR": "印尼盾", "JPY": "日圓",
             "KRW": "韓元", "MYR": "馬來西亞令吉", "NZD": "紐西蘭幣",
