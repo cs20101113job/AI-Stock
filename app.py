@@ -17,6 +17,89 @@ SHEET_COLUMNS = [
     "英文股名", "當天收盤價／現價",
 ]
 
+FX_CURRENCY_NAMES = {
+    "AED": "阿聯酋迪拉姆", "AFN": "阿富汗尼", "ALL": "阿爾巴尼亞列克",
+    "AMD": "亞美尼亞德拉姆", "ANG": "荷屬安地列斯盾", "AOA": "安哥拉寬扎",
+    "ARS": "阿根廷披索", "AUD": "澳幣", "AWG": "阿路巴盾",
+    "AZN": "亞塞拜然馬納特", "BAM": "波士尼亞-赫塞哥維納可轉換馬克",
+    "BBD": "巴貝多元", "BDT": "孟加拉塔卡", "BGN": "保加利亞列弗",
+    "BHD": "巴林第納爾", "BIF": "蒲隆地法郎", "BMD": "百慕達幣",
+    "BND": "汶萊元", "BOB": "玻利維亞諾", "BRL": "巴西雷亞爾",
+    "BSD": "巴哈馬元", "BTN": "不丹那特倫", "BWP": "波札那普拉",
+    "BYN": "白俄羅斯盧布", "BZD": "貝里斯元", "CAD": "加幣",
+    "CDF": "剛果法郎", "CHF": "瑞士法郎", "CLF": "智利記帳單位",
+    "CLP": "智利披索", "CNH": "離岸人民幣", "CNY": "人民幣",
+    "COP": "哥倫比亞披索", "CRC": "哥斯大黎加科朗", "CUP": "古巴披索",
+    "CVE": "維德角埃斯庫多", "CZK": "捷克克朗", "DJF": "吉布地法郎",
+    "DKK": "丹麥克朗", "DOP": "多明尼加披索", "DZD": "阿爾及利亞第納爾",
+    "EGP": "埃及鎊", "ERN": "厄利垂亞納克法", "ETB": "衣索比亞比爾",
+    "EUR": "歐元", "FJD": "斐濟元", "FKP": "福克蘭群島鎊",
+    "FOK": "法羅群島克朗", "GBP": "英鎊", "GEL": "喬治亞拉里",
+    "GGP": "根西島鎊", "GHS": "迦納塞地", "GIP": "直布羅陀鎊",
+    "GMD": "甘比亞達拉西", "GNF": "幾內亞法郎", "GTQ": "瓜地馬拉格查爾",
+    "GYD": "圭亞那元", "HKD": "港幣", "HNL": "宏都拉斯倫皮拉",
+    "HRK": "克羅埃西亞庫納", "HTG": "海地古德", "HUF": "匈牙利福林",
+    "IDR": "印尼盾", "ILS": "以色列新謝克爾", "IMP": "曼島鎊",
+    "INR": "印度盧比", "IQD": "伊拉克第納爾", "IRR": "伊朗里亞爾",
+    "ISK": "冰島克朗", "JEP": "澤西島鎊", "JMD": "牙買加元",
+    "JOD": "約旦第納爾", "JPY": "日圓", "KES": "肯亞先令",
+    "KGS": "吉爾吉斯索姆", "KHR": "柬埔寨瑞爾", "KID": "吉里巴斯元",
+    "KMF": "科摩羅法郎", "KRW": "韓元", "KWD": "科威特第納爾",
+    "KYD": "開曼群島元", "KZT": "哈薩克堅戈", "LAK": "寮國基普",
+    "LBP": "黎巴嫩鎊", "LKR": "斯里蘭卡盧比", "LRD": "賴比瑞亞元",
+    "LSL": "賴索托洛蒂", "LYD": "利比亞第納爾", "MAD": "摩洛哥迪拉姆",
+    "MDL": "摩爾多瓦列伊", "MGA": "馬達加斯加阿里亞里",
+    "MKD": "北馬其頓第納爾", "MMK": "緬甸元", "MNT": "蒙古圖格里克",
+    "MOP": "澳門元", "MRU": "茅利塔尼亞烏吉亞", "MUR": "模里西斯盧比",
+    "MVR": "馬爾地夫盧非亞", "MWK": "馬拉威克瓦查", "MXN": "墨西哥披索",
+    "MYR": "馬來西亞令吉", "MZN": "莫三比克梅蒂卡爾", "NAD": "納米比亞元",
+    "NGN": "奈及利亞奈拉", "NIO": "尼加拉瓜科多巴", "NOK": "挪威克朗",
+    "NPR": "尼泊爾盧比", "NZD": "紐西蘭幣", "OMR": "阿曼里亞爾",
+    "PAB": "巴拿馬巴波亞", "PEN": "秘魯索爾", "PGK": "巴布亞紐幾內亞基那",
+    "PHP": "菲律賓披索", "PKR": "巴基斯坦盧比", "PLN": "波蘭茲羅提",
+    "PYG": "巴拉圭瓜拉尼", "QAR": "卡達里亞爾", "RON": "羅馬尼亞列伊",
+    "RSD": "塞爾維亞戴納", "RUB": "俄羅斯盧布", "RWF": "盧安達法郎",
+    "SAR": "沙烏地里亞爾", "SBD": "索羅門群島元", "SCR": "塞席爾盧比",
+    "SDG": "蘇丹鎊", "SEK": "瑞典克朗", "SGD": "新加坡幣",
+    "SHP": "聖赫勒拿鎊", "SLE": "獅子山利昂", "SOS": "索馬利亞先令",
+    "SRD": "蘇利南元", "SSP": "南蘇丹鎊", "STN": "聖多美普林西比多布拉",
+    "SYP": "敘利亞鎊", "SZL": "史瓦帝尼里朗吉尼", "THB": "泰銖",
+    "TJS": "塔吉克索莫尼", "TMT": "土庫曼馬納特", "TND": "突尼西亞第納爾",
+    "TOP": "東加潘加", "TRY": "土耳其里拉", "TTD": "千里達及托巴哥元",
+    "TVD": "圖瓦盧元", "TWD": "新台幣", "TZS": "坦尚尼亞先令",
+    "UAH": "烏克蘭格里夫納", "UGX": "烏干達先令", "USD": "美元",
+    "UYU": "烏拉圭披索", "UZS": "烏茲別克索姆", "VES": "委內瑞拉玻利瓦",
+    "VND": "越南盾", "VUV": "萬那杜瓦圖", "WST": "薩摩亞塔拉",
+    "XAF": "中非法郎", "XCD": "東加勒比元", "XDR": "特別提款權",
+    "XOF": "西非法郎", "XPF": "太平洋法郎", "YER": "葉門里亞爾",
+    "ZAR": "南非蘭特", "ZMW": "尚比亞克瓦查", "ZWL": "辛巴威元",
+}
+
+
+def fx_currency_name(currency_code, fallback=None):
+    code = str(currency_code).strip().upper()
+    return FX_CURRENCY_NAMES.get(code) or fallback or code
+
+
+def fx_currency_label(currency_code):
+    code = str(currency_code).strip().upper()
+    name = FX_CURRENCY_NAMES.get(code)
+    return f"{name} ({code})" if name else code
+
+
+def localize_fx_records(frame):
+    if frame.empty or "幣別代碼" not in frame.columns:
+        return frame
+
+    localized = frame.copy()
+    if "幣別名稱" not in localized.columns:
+        localized.insert(1, "幣別名稱", "")
+    localized["幣別名稱"] = [
+        fx_currency_name(code, name if pd.notna(name) else None)
+        for code, name in zip(localized["幣別代碼"], localized["幣別名稱"])
+    ]
+    return localized
+
 # ==================== 頁面設定 ====================
 st.set_page_config(page_title="股票買賣記錄與監控系統", layout="wide")
 
@@ -388,6 +471,8 @@ def render_fx_system():
 
     targets = pd.DataFrame(fx_data["targets"])
     trades = pd.DataFrame(fx_data["trades"])
+    display_targets = localize_fx_records(targets)
+    display_trades = localize_fx_records(trades)
     target_by_code = {}
     if not targets.empty and {"幣別代碼", "期望匯率（台幣／外幣）"}.issubset(targets.columns):
         target_by_code = {
@@ -407,21 +492,15 @@ def render_fx_system():
         if not currency_codes:
             st.error("ExchangeRate-API 沒有回傳可選擇的外幣匯率。")
             return
-        currency_names = {
-            "AED": "阿聯酋迪拉姆", "AUD": "澳幣", "CAD": "加拿大幣", "CHF": "瑞士法郎",
-            "CNY": "人民幣", "EUR": "歐元", "GBP": "英鎊",
-            "HKD": "港幣", "IDR": "印尼盾", "JPY": "日圓",
-            "KRW": "韓元", "MYR": "馬來西亞令吉", "NZD": "紐西蘭幣",
-            "PHP": "菲律賓披索", "SGD": "新加坡幣", "THB": "泰銖",
-            "USD": "美金", "VND": "越南盾",
-        }
         selected_code = st.selectbox(
             "選擇幣別",
             currency_codes,
             index=currency_codes.index("USD") if "USD" in currency_codes else 0,
-            format_func=lambda code: f"{currency_names.get(code, code)} ({code})",
+            format_func=fx_currency_label,
             key="fx_selected_currency",
         )
+        currency_name = fx_currency_name(selected_code)
+        currency_label = fx_currency_label(selected_code)
         foreign_per_twd = currency_rates[selected_code]
         twd_per_foreign = 1 / foreign_per_twd
         rate_date = fx_data["rateDate"]
@@ -435,10 +514,10 @@ def render_fx_system():
                     raise ValueError("期望匯率必須大於 0。")
                 default_target = saved_target_rate
             except (TypeError, ValueError):
-                st.warning(f"{selected_code} 的已儲存期望匯率無效，請重新設定。")
+                st.warning(f"{currency_label} 的已儲存期望匯率無效，請重新設定。")
 
         target_rate = st.number_input(
-            f"1 {selected_code} 對台幣期望匯率",
+            f"1 {currency_label} 對台幣期望匯率",
             min_value=0.0001,
             value=max(default_target, 0.0001),
             step=0.1,
@@ -450,19 +529,22 @@ def render_fx_system():
                 save_fx_data({
                     "action": "saveFxTarget",
                     "currencyCode": selected_code,
-                    "currencyName": currency_names.get(selected_code, selected_code),
+                    "currencyName": currency_name,
                     "targetRate": target_rate,
                 })
             except (requests.RequestException, ValueError) as error:
                 st.error(f"儲存匯率目標失敗：{error}")
             else:
-                st.success(f"已儲存 {selected_code} 目標匯率：{target_rate:.4f} TWD。")
+                st.success(f"已儲存 {currency_label} 目標匯率：{target_rate:.4f} TWD。")
                 st.rerun()
 
-        st.subheader(f"{currency_names.get(selected_code, selected_code)} ({selected_code}) 匯率")
+        st.subheader(f"{currency_label} 匯率")
         rate_col1, rate_col2 = st.columns(2)
-        rate_col1.metric(f"1 {selected_code} 對台幣", f"NT$ {twd_per_foreign:,.6f}")
-        rate_col2.metric(f"1 台幣對 {selected_code}", f"{foreign_per_twd:,.6f} {selected_code}")
+        rate_col1.metric(f"1 {currency_label} 對台幣", f"NT$ {twd_per_foreign:,.6f}")
+        rate_col2.metric(
+            f"1 台幣對 {currency_label}",
+            f"{foreign_per_twd:,.6f} {currency_label}",
+        )
         st.caption(
             "資料來源：[ExchangeRate-API](https://www.exchangerate-api.com/)。"
             f"匯率更新日期：{rate_date}；API 更新時間：{fx_data['updatedAt']}。"
@@ -485,7 +567,7 @@ def render_fx_system():
             "紀錄會保存換匯日期及 API 匯率更新日期；參考匯率不代表實際成交匯率。"
         )
         foreign_amount = st.number_input(
-            f"換匯金額（{selected_code}，可留 0）",
+            f"換匯金額（{currency_label}，可留 0）",
             min_value=0.0,
             step=100.0,
             key=f"fx_trade_amount_{selected_code}",
@@ -497,7 +579,7 @@ def render_fx_system():
                     "action": "recordFxTrade",
                     "exchangeDate": exchange_date,
                     "currencyCode": selected_code,
-                    "currencyName": currency_names.get(selected_code, selected_code),
+                    "currencyName": currency_name,
                     "sellRate": twd_per_foreign,
                     "rateDate": rate_date,
                     "foreignAmount": foreign_amount,
@@ -506,7 +588,7 @@ def render_fx_system():
             except (requests.RequestException, ValueError) as error:
                 st.error(f"新增換匯紀錄失敗：{error}")
             else:
-                st.success(f"已記錄 {exchange_date} 的 {selected_code} 換匯匯率。")
+                st.success(f"已記錄 {exchange_date} 的 {currency_label} 匯率。")
                 st.rerun()
     else:
         st.info("目前無法取得 API 匯率，暫時無法設定目標或記錄換匯。")
@@ -516,8 +598,8 @@ def render_fx_system():
     if targets.empty:
         st.info("尚未設定匯率目標。")
     else:
-        st.dataframe(targets, use_container_width=True, hide_index=True)
-        targets_csv = targets.to_csv(index=False).encode("utf-8-sig")
+        st.dataframe(display_targets, use_container_width=True, hide_index=True)
+        targets_csv = display_targets.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             "下載匯率目標 CSV",
             targets_csv,
@@ -529,8 +611,8 @@ def render_fx_system():
     if trades.empty:
         st.info("尚無換匯紀錄。")
     else:
-        st.dataframe(trades, use_container_width=True, hide_index=True)
-        trades_csv = trades.to_csv(index=False).encode("utf-8-sig")
+        st.dataframe(display_trades, use_container_width=True, hide_index=True)
+        trades_csv = display_trades.to_csv(index=False).encode("utf-8-sig")
         st.download_button(
             "下載換匯紀錄 CSV",
             trades_csv,
