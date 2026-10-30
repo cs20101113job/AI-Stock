@@ -31,16 +31,17 @@ var FX_MONITOR_TRIGGER_FUNCTION = "monitorFxRates";
 var MONITOR_MAX_ALERTS_PER_CONDITION = 5;
 var FX_TARGET_SHEET_NAME = "匯率目標";
 var FX_TRADE_SHEET_NAME = "換匯紀錄";
-var FX_TARGET_HEADERS = ["幣別代碼", "幣別名稱", "期望賣出匯率", "啟用"];
+var FX_TARGET_HEADERS = ["幣別代碼", "幣別名稱", "期望收盤匯率", "啟用"];
 var FX_TRADE_HEADERS = [
   "換匯日期",
   "幣別代碼",
   "幣別名稱",
   "換匯匯率（台幣／外幣）",
   "外幣金額",
-  "台幣金額"
+  "台幣金額",
+  "匯率資料日期"
 ];
-var BANK_FX_RATE_URL = "https://rate.bot.com.tw/xrt/flcsv/0/day";
+var CBC_CLOSING_RATE_URL = "https://www.cbc.gov.tw/tw/lp-645-1.html";
 var HOLIDAY_API_URL = "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule";
 var QUOTE_API_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp";
 
@@ -277,11 +278,22 @@ function getFxSheet_(sheetName, headers) {
     return sheet;
   }
 
-  var actualHeaders = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1))
+  var lastColumn = Math.max(sheet.getLastColumn(), 1);
+  var actualHeaders = sheet.getRange(1, 1, 1, lastColumn)
     .getDisplayValues()[0].map(function (value) { return String(value).trim(); });
+  var headerAliases = { "期望收盤匯率": "期望賣出匯率" };
   headers.forEach(function (header) {
     if (actualHeaders.indexOf(header) === -1) {
-      throw new Error('工作表「' + sheetName + '」缺少欄位「' + header + '」。');
+      var previousHeader = headerAliases[header];
+      var previousIndex = previousHeader ? actualHeaders.indexOf(previousHeader) : -1;
+      if (previousIndex !== -1) {
+        sheet.getRange(1, previousIndex + 1).setValue(header);
+        actualHeaders[previousIndex] = header;
+      } else {
+        lastColumn++;
+        sheet.getRange(1, lastColumn).setValue(header);
+        actualHeaders.push(header);
+      }
     }
   });
   return sheet;
@@ -359,8 +371,10 @@ function recordFxTrade_(contents) {
   var currency = validateFxCurrency_(contents);
   var sellRate = Number(contents.sellRate);
   var foreignAmount = Number(contents.foreignAmount);
+  var rateDate = String(contents.rateDate || "").trim();
   if (!isFinite(sellRate) || sellRate <= 0 ||
-      !isFinite(foreignAmount) || foreignAmount < 0) {
+      !isFinite(foreignAmount) || foreignAmount < 0 ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(rateDate)) {
     throw new Error("換匯匯率與金額格式無效。");
   }
 
@@ -372,8 +386,61 @@ function recordFxTrade_(contents) {
     currency.name,
     sellRate,
     foreignAmount,
-    Number((foreignAmount * sellRate).toFixed(2))
+    Number((foreignAmount * sellRate).toFixed(2)),
+    rateDate
   ]);
+}
+
+function getCbcClosingRate_() {
+  var response = UrlFetchApp.fetch(CBC_CLOSING_RATE_URL, {
+    headers: { "User-Agent": "Mozilla/5.0" },
+    muteHttpExceptions: true
+  });
+  if (response.getResponseCode() !== 200) {
+    throw new Error("讀取央行收盤匯率失敗，HTTP " + response.getResponseCode());
+  }
+
+  var html = response.getContentText("UTF-8");
+  var tableMatch = html.match(/<table\b[^>]*>([\s\S]*?)<\/table>/i);
+  if (!tableMatch) {
+    throw new Error("央行匯率頁面未包含收盤匯率資料表。");
+  }
+
+  var rowMatches = tableMatch[1].match(/<tr\b[^>]*>[\s\S]*?<\/tr>/gi) || [];
+  if (!rowMatches.length || !/NTD\/USD/i.test(rowMatches[0])) {
+    throw new Error("央行匯率資料表欄位不符，預期為新臺幣/美元收盤匯率。");
+  }
+
+  var latest = null;
+  for (var rowIndex = 1; rowIndex < rowMatches.length; rowIndex++) {
+    var cells = [];
+    var cellMatch;
+    var cellPattern = /<td\b[^>]*>([\s\S]*?)<\/td>/gi;
+    while ((cellMatch = cellPattern.exec(rowMatches[rowIndex])) !== null) {
+      cells.push(cellMatch[1].replace(/<[^>]*>/g, "").trim());
+    }
+    if (cells.length < 2) {
+      continue;
+    }
+
+    var dateMatch = cells[0].match(/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/);
+    var rate = parseMonitorPrice_(cells[1]);
+    if (!dateMatch || rate <= 0) {
+      continue;
+    }
+    var rateDate = dateMatch[1] + "-" +
+      ("0" + dateMatch[2]).slice(-2) + "-" +
+      ("0" + dateMatch[3]).slice(-2);
+    var sortableDate = Number(rateDate.replace(/-/g, ""));
+    if (!latest || sortableDate > latest.sortableDate) {
+      latest = { rate: rate, rateDate: rateDate, sortableDate: sortableDate };
+    }
+  }
+
+  if (!latest) {
+    throw new Error("央行匯率頁面沒有可用的新臺幣/美元收盤匯率。");
+  }
+  return latest;
 }
 
 function monitorFxRates() {
@@ -400,62 +467,34 @@ function monitorFxRates() {
       return;
     }
 
-    var response = UrlFetchApp.fetch(BANK_FX_RATE_URL, {
-      headers: {
-        "Accept": "text/csv,text/plain,*/*",
-        "Referer": "https://rate.bot.com.tw/xrt?Lang=zh-TW",
-        "User-Agent": "Mozilla/5.0"
-      },
-      muteHttpExceptions: true
-    });
-    if (response.getResponseCode() !== 200) {
-      throw new Error("讀取臺灣銀行匯率失敗，HTTP " + response.getResponseCode());
-    }
-    var csvText = response.getContentText("UTF-8");
-    if (/^\s*</.test(csvText)) {
-      throw new Error("臺灣銀行匯率服務未回傳 CSV 資料。");
-    }
-    var rows = Utilities.parseCsv(csvText);
-    if (rows.length < 2) {
-      throw new Error("臺灣銀行匯率 CSV 沒有匯率資料。");
-    }
-
-    var rates = {};
-    rows.slice(1).forEach(function (row) {
-      if (row.length < 6) {
-        return;
-      }
-      var code = String(row[0]).trim().toUpperCase();
-      var rate = parseMonitorPrice_(row[5]);
-      if (code && rate > 0) {
-        rates[code] = rate;
-      }
-    });
-
-    var localDate = Utilities.formatDate(new Date(), MONITOR_TIME_ZONE, "yyyyMMdd");
+    var closingRate = getCbcClosingRate_();
     var spreadsheetId = SpreadsheetApp.getActiveSpreadsheet().getId();
     activeTargets.forEach(function (target) {
       var currencyCode = String(target[0]).trim().toUpperCase();
+      if (currencyCode !== "USD") {
+        console.log("央行收盤匯率資料不包含 " + currencyCode + "；略過該目標。");
+        return;
+      }
       var currencyName = String(target[1]).trim() || currencyCode;
       var targetRate = parseMonitorPrice_(target[2]);
-      var currentRate = rates[currencyCode];
-      if (!currentRate || !targetRate || currentRate > targetRate) {
+      if (!targetRate || closingRate.rate > targetRate) {
         return;
       }
 
       var alertKey = "fx_rate_alert_" + spreadsheetId + "_" + currencyCode + "_" + targetRate;
       var properties = PropertiesService.getScriptProperties();
-      if (properties.getProperty(alertKey) === localDate) {
+      if (properties.getProperty(alertKey) === closingRate.rateDate) {
         return;
       }
       sendMonitorTelegram_(
         "💱 【台幣換匯匯率達標】" + currencyName + " (" + currencyCode + ")" +
-        "\n臺灣銀行即期賣出：1 " + currencyCode + " = NT$ " + currentRate.toFixed(4) +
-        "\n反向匯率：1 TWD = " + (1 / currentRate).toFixed(6) + " " + currencyCode +
+        "\n央行收盤匯率（" + closingRate.rateDate + "）：1 " + currencyCode +
+        " = NT$ " + closingRate.rate.toFixed(4) +
+        "\n反向匯率：1 TWD = " + (1 / closingRate.rate).toFixed(6) + " " + currencyCode +
         "\n期望值：NT$ " + targetRate.toFixed(4) +
         "\n達標條件：目前匯率小於或等於期望值。"
       );
-      properties.setProperty(alertKey, localDate);
+      properties.setProperty(alertKey, closingRate.rateDate);
     });
   } finally {
     lock.releaseLock();

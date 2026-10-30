@@ -1,5 +1,6 @@
 from datetime import datetime
 from io import StringIO
+import re
 from zoneinfo import ZoneInfo
 
 import streamlit as st
@@ -337,45 +338,47 @@ def send_telegram_msg(message):
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def load_taiwan_bank_fx_rates():
+def load_cbc_closing_rates():
     response = requests.get(
-        "https://rate.bot.com.tw/xrt/flcsv/0/day",
-        headers={
-            "Accept": "text/csv,text/plain,*/*",
-            "Referer": "https://rate.bot.com.tw/xrt?Lang=zh-TW",
-            "User-Agent": "Mozilla/5.0",
-        },
+        "https://www.cbc.gov.tw/tw/lp-645-1.html",
+        headers={"User-Agent": "Mozilla/5.0"},
         timeout=15,
     )
     response.raise_for_status()
-    content_type = response.headers.get("Content-Type", "").lower()
-    if "html" in content_type or response.text.lstrip().lower().startswith(("<!doctype html", "<html")):
-        raise ValueError("臺灣銀行匯率服務目前回傳非 CSV 資料，請稍後再試。")
+    content = response.text
+    table_match = re.search(r"<table\b[^>]*>(.*?)</table>", content, re.IGNORECASE | re.DOTALL)
+    if not table_match:
+        raise ValueError("央行匯率頁面未包含收盤匯率資料表。")
 
-    response.encoding = "utf-8-sig"
-    rates = pd.read_csv(
-        StringIO(response.text),
-        header=None,
-        skiprows=1,
-        dtype=str,
-        keep_default_na=False,
-    )
-    if rates.shape[1] < 6:
-        raise ValueError("臺灣銀行匯率 CSV 欄位格式不符，無法讀取即期賣出匯率。")
+    rows = re.findall(r"<tr\b[^>]*>(.*?)</tr>", table_match.group(1), re.IGNORECASE | re.DOTALL)
+    if not rows or "NTD/USD" not in re.sub(r"<[^>]+>", "", rows[0]).upper():
+        raise ValueError("央行匯率資料表欄位不符，預期為新臺幣/美元收盤匯率。")
 
-    result = {}
-    for _, row in rates.iterrows():
-        code = str(row.iloc[0]).strip().upper()
-        name = str(row.iloc[1]).strip()
+    closing_rates = []
+    for row in rows[1:]:
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, re.IGNORECASE | re.DOTALL)
+        if len(cells) < 2:
+            continue
+        date_text = re.sub(r"<[^>]+>", "", cells[0]).strip()
+        rate_text = re.sub(r"<[^>]+>", "", cells[1]).strip().replace(",", "")
         try:
-            sell_rate = float(str(row.iloc[5]).replace(",", "").strip())
+            rate = float(rate_text)
+            rate_date = datetime.strptime(date_text, "%Y/%m/%d").date()
         except ValueError:
             continue
-        if code and name and sell_rate > 0:
-            result[code] = {"name": name, "sell_rate": sell_rate}
-    if not result:
-        raise ValueError("臺灣銀行匯率 CSV 中沒有可用的即期賣出匯率。")
-    return result
+        if rate > 0:
+            closing_rates.append((rate_date, rate))
+    if not closing_rates:
+        raise ValueError("央行匯率頁面沒有可用的新臺幣/美元收盤匯率。")
+
+    rate_date, rate = max(closing_rates)
+    return {
+        "USD": {
+            "name": "美金",
+            "close_rate": rate,
+            "rate_date": rate_date.isoformat(),
+        }
+    }
 
 
 def load_fx_data():
@@ -401,9 +404,12 @@ def save_fx_data(payload):
 
 def render_fx_system():
     st.title("💱 台幣換匯系統")
-    st.caption("匯率參考臺灣銀行即期賣出匯率；1 外幣 = 新台幣匯率，反向匯率以其倒數計算。")
-    if st.button("🔄 立即更新臺灣銀行匯率"):
-        load_taiwan_bank_fx_rates.clear()
+    st.caption(
+        "資料來源：中央銀行新臺幣/美元銀行間收盤匯率；"
+        "顯示最近一個有資料的交易日，反向匯率以收盤匯率倒數計算。"
+    )
+    if st.button("🔄 立即更新央行收盤匯率"):
+        load_cbc_closing_rates.clear()
 
     try:
         fx_data = load_fx_data()
@@ -412,15 +418,15 @@ def render_fx_system():
         fx_data = {"targets": [], "trades": []}
 
     try:
-        bank_rates = load_taiwan_bank_fx_rates()
+        closing_rates = load_cbc_closing_rates()
     except (requests.RequestException, ValueError, pd.errors.ParserError) as error:
-        st.error(f"無法讀取臺灣銀行匯率：{error}")
-        bank_rates = {}
+        st.error(f"無法讀取央行收盤匯率：{error}")
+        closing_rates = {}
 
     targets = pd.DataFrame(fx_data["targets"])
     trades = pd.DataFrame(fx_data["trades"])
     target_by_code = {}
-    if not targets.empty and {"幣別代碼", "期望賣出匯率"}.issubset(targets.columns):
+    if not targets.empty and {"幣別代碼", "期望收盤匯率"}.issubset(targets.columns):
         target_by_code = {
             str(row["幣別代碼"]).strip().upper(): row
             for _, row in targets.iterrows()
@@ -432,23 +438,24 @@ def render_fx_system():
         "請執行一次 installPriceMonitor() 並授權排程。"
     )
 
-    if bank_rates:
-        currency_codes = sorted(bank_rates)
-        default_code = "USD" if "USD" in bank_rates else currency_codes[0]
+    if closing_rates:
+        currency_codes = sorted(closing_rates)
+        default_code = "USD"
         selected_code = st.selectbox(
             "選擇幣別",
             currency_codes,
             index=currency_codes.index(default_code),
-            format_func=lambda code: f"{bank_rates[code]['name']} ({code})",
+            format_func=lambda code: f"{closing_rates[code]['name']} ({code})",
             key="fx_selected_currency",
         )
-        selected_rate = bank_rates[selected_code]["sell_rate"]
+        selected_rate = closing_rates[selected_code]["close_rate"]
+        rate_date = closing_rates[selected_code]["rate_date"]
         current_target = target_by_code.get(selected_code)
         default_target = 30.0 if selected_code == "USD" else 0.0
         saved_target_rate = None
         if current_target is not None:
             try:
-                saved_target_rate = float(current_target["期望賣出匯率"])
+                saved_target_rate = float(current_target["期望收盤匯率"])
                 if saved_target_rate <= 0:
                     raise ValueError("期望匯率必須大於 0。")
                 default_target = saved_target_rate
@@ -456,7 +463,7 @@ def render_fx_system():
                 st.warning(f"{selected_code} 的已儲存期望匯率無效，請重新設定。")
 
         target_rate = st.number_input(
-            f"1 {selected_code} 對台幣期望值（臺灣銀行即期賣出）",
+            f"1 {selected_code} 對台幣期望收盤匯率",
             min_value=0.0001,
             value=max(default_target, 0.0001),
             step=0.1,
@@ -468,7 +475,7 @@ def render_fx_system():
                 save_fx_data({
                     "action": "saveFxTarget",
                     "currencyCode": selected_code,
-                    "currencyName": bank_rates[selected_code]["name"],
+                    "currencyName": closing_rates[selected_code]["name"],
                     "targetRate": target_rate,
                 })
             except (requests.RequestException, ValueError) as error:
@@ -477,14 +484,15 @@ def render_fx_system():
                 st.success(f"已儲存 {selected_code} 目標匯率：{target_rate:.4f} TWD。")
                 st.rerun()
 
-        st.subheader(f"{bank_rates[selected_code]['name']} ({selected_code}) 即時匯率")
+        st.subheader(f"{closing_rates[selected_code]['name']} ({selected_code}) 最近收盤匯率")
         inverse_rate = 1 / selected_rate
         rate_col1, rate_col2 = st.columns(2)
-        rate_col1.metric(f"1 {selected_code} 對台幣", f"NT$ {selected_rate:,.4f}")
+        rate_col1.metric(f"1 {selected_code} 對台幣（{rate_date} 收盤）", f"NT$ {selected_rate:,.4f}")
         rate_col2.metric(f"1 台幣對 {selected_code}", f"{inverse_rate:,.6f} {selected_code}")
         st.caption(
-            "資料來源：臺灣銀行牌告匯率。資料擷取時間（台北）："
-            f"{datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y-%m-%d %H:%M:%S')}"
+            "資料來源："
+            "[中央銀行新臺幣/美元銀行間收盤匯率](https://www.cbc.gov.tw/tw/lp-645-1.html)。"
+            "此資料集目前僅提供 USD/TWD；其他幣別不顯示。"
         )
 
         if current_target is not None and saved_target_rate is not None:
@@ -500,6 +508,10 @@ def render_fx_system():
                 )
 
         st.markdown("#### 新增本次換匯紀錄")
+        st.caption(
+            "紀錄會保留按下換匯的日期及所採用的收盤匯率資料日期；"
+            "央行收盤匯率為參考值，不代表實際成交匯率。"
+        )
         foreign_amount = st.number_input(
             f"換匯金額（{selected_code}，可留 0）",
             min_value=0.0,
@@ -513,8 +525,9 @@ def render_fx_system():
                     "action": "recordFxTrade",
                     "exchangeDate": exchange_date,
                     "currencyCode": selected_code,
-                    "currencyName": bank_rates[selected_code]["name"],
+                    "currencyName": closing_rates[selected_code]["name"],
                     "sellRate": selected_rate,
+                    "rateDate": rate_date,
                     "foreignAmount": foreign_amount,
                     "twdAmount": foreign_amount * selected_rate,
                 })
@@ -524,7 +537,7 @@ def render_fx_system():
                 st.success(f"已記錄 {exchange_date} 的 {selected_code} 換匯匯率。")
                 st.rerun()
     else:
-        st.info("目前無法取得銀行牌告匯率，暫時無法設定目標或記錄換匯。")
+        st.info("目前無法取得央行收盤匯率，暫時無法設定目標或記錄換匯。")
 
     st.markdown("---")
     st.subheader("已設定匯率目標")
