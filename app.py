@@ -1,5 +1,6 @@
 from datetime import datetime
 from io import StringIO
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 import pandas as pd
@@ -55,21 +56,21 @@ if not check_password():
     st.stop()
 
 # ==================== 主系統畫面 (登入成功後呈現) ====================
-st.title("📈 股票買賣記錄與即時監控系統")
+GAS_WEB_APP_URL = st.secrets.get("GAS_WEB_APP_URL", "請在此處貼上你的_GAS_WEB_APP_URL")
 
-
-version_number = "20261021. CS. V1.0 最終版"
-st.write(f"📊 系統版本: {version_number}")
-
-# 側邊欄增加登出按鈕
+# 側邊欄增加系統切換與登出按鈕
 with st.sidebar:
     st.write("👤 登入狀態：已驗證")
+    selected_system = st.radio(
+        "系統選單",
+        ["股票買賣記錄與即時監控系統", "台幣換匯系統"],
+        key="selected_system",
+    )
     if st.button("🚪 登出系統"):
         st.session_state["password_correct"] = False
         st.rerun()
 
 # ==================== GAS Web App URL 設定 ====================
-GAS_WEB_APP_URL = st.secrets.get("GAS_WEB_APP_URL", "請在此處貼上你的_GAS_WEB_APP_URL")
 STOCK_REFERENCE_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/"
     "1DTOV9f3WSzu4sRksO6VpU8zIEU0fVqs_ZWaStEnAYeI/"
@@ -300,8 +301,6 @@ def save_to_google_sheet(
         st.error(f"寫入 Google Sheet 發生錯誤: {e}")
         return False
 
-df = load_data()
-
 # ==================== Telegram 訊息發送 ====================
 def send_telegram_msg(message):
     token = st.secrets.get("TELEGRAM_BOT_TOKEN")
@@ -336,7 +335,236 @@ def send_telegram_msg(message):
     except (requests.RequestException, ValueError) as e:
         return False, f"Telegram 發送失敗：{e}"
 
+
+@st.cache_data(ttl=60, show_spinner=False)
+def load_taiwan_bank_fx_rates():
+    response = requests.get(
+        "https://rate.bot.com.tw/xrt/flcsv/0/day",
+        headers={
+            "Accept": "text/csv,text/plain,*/*",
+            "Referer": "https://rate.bot.com.tw/xrt?Lang=zh-TW",
+            "User-Agent": "Mozilla/5.0",
+        },
+        timeout=15,
+    )
+    response.raise_for_status()
+    content_type = response.headers.get("Content-Type", "").lower()
+    if "html" in content_type or response.text.lstrip().lower().startswith(("<!doctype html", "<html")):
+        raise ValueError("臺灣銀行匯率服務目前回傳非 CSV 資料，請稍後再試。")
+
+    response.encoding = "utf-8-sig"
+    rates = pd.read_csv(
+        StringIO(response.text),
+        header=None,
+        skiprows=1,
+        dtype=str,
+        keep_default_na=False,
+    )
+    if rates.shape[1] < 6:
+        raise ValueError("臺灣銀行匯率 CSV 欄位格式不符，無法讀取即期賣出匯率。")
+
+    result = {}
+    for _, row in rates.iterrows():
+        code = str(row.iloc[0]).strip().upper()
+        name = str(row.iloc[1]).strip()
+        try:
+            sell_rate = float(str(row.iloc[5]).replace(",", "").strip())
+        except ValueError:
+            continue
+        if code and name and sell_rate > 0:
+            result[code] = {"name": name, "sell_rate": sell_rate}
+    if not result:
+        raise ValueError("臺灣銀行匯率 CSV 中沒有可用的即期賣出匯率。")
+    return result
+
+
+def load_fx_data():
+    response = requests.get(
+        GAS_WEB_APP_URL,
+        params={"action": "fxData"},
+        timeout=15,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, dict) or not isinstance(data.get("targets"), list) or not isinstance(data.get("trades"), list):
+        raise ValueError("Google Apps Script 回傳的匯兌資料格式錯誤，請確認已部署最新版程式。")
+    return data
+
+
+def save_fx_data(payload):
+    response = requests.post(GAS_WEB_APP_URL, json=payload, timeout=15)
+    response.raise_for_status()
+    result = response.json()
+    if result.get("result") != "success":
+        raise ValueError(result.get("message", "Google Apps Script 未能儲存匯兌資料。"))
+
+
+def render_fx_system():
+    st.title("💱 台幣換匯系統")
+    st.caption("匯率參考臺灣銀行即期賣出匯率；1 外幣 = 新台幣匯率，反向匯率以其倒數計算。")
+    if st.button("🔄 立即更新臺灣銀行匯率"):
+        load_taiwan_bank_fx_rates.clear()
+
+    try:
+        fx_data = load_fx_data()
+    except (requests.RequestException, ValueError) as error:
+        st.error(f"無法讀取匯率目標與換匯紀錄：{error}")
+        fx_data = {"targets": [], "trades": []}
+
+    try:
+        bank_rates = load_taiwan_bank_fx_rates()
+    except (requests.RequestException, ValueError, pd.errors.ParserError) as error:
+        st.error(f"無法讀取臺灣銀行匯率：{error}")
+        bank_rates = {}
+
+    targets = pd.DataFrame(fx_data["targets"])
+    trades = pd.DataFrame(fx_data["trades"])
+    target_by_code = {}
+    if not targets.empty and {"幣別代碼", "期望賣出匯率"}.issubset(targets.columns):
+        target_by_code = {
+            str(row["幣別代碼"]).strip().upper(): row
+            for _, row in targets.iterrows()
+        }
+
+    st.subheader("設定匯率目標")
+    st.caption(
+        "背景 Telegram 通知每 5 分鐘檢查一次；首次更新 Apps Script 後，"
+        "請執行一次 installPriceMonitor() 並授權排程。"
+    )
+
+    if bank_rates:
+        currency_codes = sorted(bank_rates)
+        default_code = "USD" if "USD" in bank_rates else currency_codes[0]
+        selected_code = st.selectbox(
+            "選擇幣別",
+            currency_codes,
+            index=currency_codes.index(default_code),
+            format_func=lambda code: f"{bank_rates[code]['name']} ({code})",
+            key="fx_selected_currency",
+        )
+        selected_rate = bank_rates[selected_code]["sell_rate"]
+        current_target = target_by_code.get(selected_code)
+        default_target = 30.0 if selected_code == "USD" else 0.0
+        saved_target_rate = None
+        if current_target is not None:
+            try:
+                saved_target_rate = float(current_target["期望賣出匯率"])
+                if saved_target_rate <= 0:
+                    raise ValueError("期望匯率必須大於 0。")
+                default_target = saved_target_rate
+            except (TypeError, ValueError):
+                st.warning(f"{selected_code} 的已儲存期望匯率無效，請重新設定。")
+
+        target_rate = st.number_input(
+            f"1 {selected_code} 對台幣期望值（臺灣銀行即期賣出）",
+            min_value=0.0001,
+            value=max(default_target, 0.0001),
+            step=0.1,
+            format="%.4f",
+            key=f"fx_target_rate_{selected_code}",
+        )
+        if st.button("儲存匯率目標"):
+            try:
+                save_fx_data({
+                    "action": "saveFxTarget",
+                    "currencyCode": selected_code,
+                    "currencyName": bank_rates[selected_code]["name"],
+                    "targetRate": target_rate,
+                })
+            except (requests.RequestException, ValueError) as error:
+                st.error(f"儲存匯率目標失敗：{error}")
+            else:
+                st.success(f"已儲存 {selected_code} 目標匯率：{target_rate:.4f} TWD。")
+                st.rerun()
+
+        st.subheader(f"{bank_rates[selected_code]['name']} ({selected_code}) 即時匯率")
+        inverse_rate = 1 / selected_rate
+        rate_col1, rate_col2 = st.columns(2)
+        rate_col1.metric(f"1 {selected_code} 對台幣", f"NT$ {selected_rate:,.4f}")
+        rate_col2.metric(f"1 台幣對 {selected_code}", f"{inverse_rate:,.6f} {selected_code}")
+        st.caption(
+            "資料來源：臺灣銀行牌告匯率。資料擷取時間（台北）："
+            f"{datetime.now(ZoneInfo('Asia/Taipei')).strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+
+        if current_target is not None and saved_target_rate is not None:
+            if selected_rate <= saved_target_rate:
+                st.success(
+                    f"已達到期望值（目前 {selected_rate:.4f} ≤ 目標 {saved_target_rate:.4f}），"
+                    "排程啟用後將透過 Telegram 通知。"
+                )
+            else:
+                st.info(
+                    f"尚未達標；目前 {selected_rate:.4f}，"
+                    f"目標 {saved_target_rate:.4f} TWD。"
+                )
+
+        st.markdown("#### 新增本次換匯紀錄")
+        foreign_amount = st.number_input(
+            f"換匯金額（{selected_code}，可留 0）",
+            min_value=0.0,
+            step=100.0,
+            key=f"fx_trade_amount_{selected_code}",
+        )
+        if st.button("💱 換匯並記錄當天匯率"):
+            exchange_date = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d")
+            try:
+                save_fx_data({
+                    "action": "recordFxTrade",
+                    "exchangeDate": exchange_date,
+                    "currencyCode": selected_code,
+                    "currencyName": bank_rates[selected_code]["name"],
+                    "sellRate": selected_rate,
+                    "foreignAmount": foreign_amount,
+                    "twdAmount": foreign_amount * selected_rate,
+                })
+            except (requests.RequestException, ValueError) as error:
+                st.error(f"新增換匯紀錄失敗：{error}")
+            else:
+                st.success(f"已記錄 {exchange_date} 的 {selected_code} 換匯匯率。")
+                st.rerun()
+    else:
+        st.info("目前無法取得銀行牌告匯率，暫時無法設定目標或記錄換匯。")
+
+    st.markdown("---")
+    st.subheader("已設定匯率目標")
+    if targets.empty:
+        st.info("尚未設定匯率目標。")
+    else:
+        st.dataframe(targets, use_container_width=True, hide_index=True)
+        targets_csv = targets.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "下載匯率目標 CSV",
+            targets_csv,
+            file_name="台幣換匯目標.csv",
+            mime="text/csv",
+        )
+
+    st.subheader("換匯紀錄")
+    if trades.empty:
+        st.info("尚無換匯紀錄。")
+    else:
+        st.dataframe(trades, use_container_width=True, hide_index=True)
+        trades_csv = trades.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "下載換匯紀錄 CSV",
+            trades_csv,
+            file_name="台幣換匯紀錄.csv",
+            mime="text/csv",
+        )
+
+
+if selected_system == "台幣換匯系統":
+    render_fx_system()
+    st.stop()
+
+st.title("📈 股票買賣記錄與即時監控系統")
+version_number = "20261021. CS. V1.0 最終版"
+st.write(f"📊 系統版本: {version_number}")
+
 # ==================== Yahoo 股市價格抓取 ====================
+df = load_data()
+
 @st.cache_data(ttl=300, show_spinner=False)
 def get_stock_info(stock_id):
     stock_id = str(stock_id).strip()

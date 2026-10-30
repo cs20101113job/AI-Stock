@@ -27,7 +27,20 @@ var SHEET_HEADERS = [
 var SHEET_NAME = "股票買買";
 var MONITOR_TIME_ZONE = "Asia/Taipei";
 var MONITOR_TRIGGER_FUNCTION = "monitorStockPrices";
+var FX_MONITOR_TRIGGER_FUNCTION = "monitorFxRates";
 var MONITOR_MAX_ALERTS_PER_CONDITION = 5;
+var FX_TARGET_SHEET_NAME = "匯率目標";
+var FX_TRADE_SHEET_NAME = "換匯紀錄";
+var FX_TARGET_HEADERS = ["幣別代碼", "幣別名稱", "期望賣出匯率", "啟用"];
+var FX_TRADE_HEADERS = [
+  "換匯日期",
+  "幣別代碼",
+  "幣別名稱",
+  "換匯匯率（台幣／外幣）",
+  "外幣金額",
+  "台幣金額"
+];
+var BANK_FX_RATE_URL = "https://rate.bot.com.tw/xrt/flcsv/0/day";
 var HOLIDAY_API_URL = "https://openapi.twse.com.tw/v1/holidaySchedule/holidaySchedule";
 var QUOTE_API_URL = "https://mis.twse.com.tw/stock/api/getStockInfo.jsp";
 
@@ -116,7 +129,11 @@ function jsonOutput_(data) {
     .setMimeType(ContentService.MimeType.JSON);
 }
 
-function doGet() {
+function doGet(e) {
+  if (e && e.parameter && e.parameter.action === "fxData") {
+    return jsonOutput_(getFxData_());
+  }
+
   var sheet = getSheet_();
   ensureHeaders_(sheet);
 
@@ -142,14 +159,25 @@ function doGet() {
 
 function doPost(e) {
   try {
-    var sheet = getSheet_();
-    ensureHeaders_(sheet);
-
     var contents = JSON.parse(e.postData.contents);
-    if (!contents || !contents.row) {
+    if (!contents || typeof contents !== "object") {
+      throw new Error("Request body must be a JSON object.");
+    }
+
+    if (contents.action === "saveFxTarget") {
+      saveFxTarget_(contents);
+      return jsonOutput_({ result: "success" });
+    }
+    if (contents.action === "recordFxTrade") {
+      recordFxTrade_(contents);
+      return jsonOutput_({ result: "success" });
+    }
+    if (!contents.row) {
       throw new Error("Request body must contain row data.");
     }
 
+    var sheet = getSheet_();
+    ensureHeaders_(sheet);
     var rowData;
     if (Array.isArray(contents.row)) {
       var sourceHeaders = Array.isArray(contents.headers)
@@ -212,7 +240,8 @@ function installPriceMonitor() {
 
   var triggers = ScriptApp.getProjectTriggers();
   triggers.forEach(function (trigger) {
-    if (trigger.getHandlerFunction() === MONITOR_TRIGGER_FUNCTION) {
+    if (trigger.getHandlerFunction() === MONITOR_TRIGGER_FUNCTION ||
+        trigger.getHandlerFunction() === FX_MONITOR_TRIGGER_FUNCTION) {
       ScriptApp.deleteTrigger(trigger);
     }
   });
@@ -220,14 +249,217 @@ function installPriceMonitor() {
     .timeBased()
     .everyMinutes(1)
     .create();
+  ScriptApp.newTrigger(FX_MONITOR_TRIGGER_FUNCTION)
+    .timeBased()
+    .everyMinutes(5)
+    .create();
 }
 
 function removePriceMonitor() {
   ScriptApp.getProjectTriggers().forEach(function (trigger) {
-    if (trigger.getHandlerFunction() === MONITOR_TRIGGER_FUNCTION) {
+    if (trigger.getHandlerFunction() === MONITOR_TRIGGER_FUNCTION ||
+        trigger.getHandlerFunction() === FX_MONITOR_TRIGGER_FUNCTION) {
       ScriptApp.deleteTrigger(trigger);
     }
   });
+}
+
+function getFxSheet_(sheetName, headers) {
+  var spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  var sheet = spreadsheet.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = spreadsheet.insertSheet(sheetName);
+  }
+
+  if (sheet.getLastRow() === 0) {
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+    return sheet;
+  }
+
+  var actualHeaders = sheet.getRange(1, 1, 1, Math.max(sheet.getLastColumn(), 1))
+    .getDisplayValues()[0].map(function (value) { return String(value).trim(); });
+  headers.forEach(function (header) {
+    if (actualHeaders.indexOf(header) === -1) {
+      throw new Error('工作表「' + sheetName + '」缺少欄位「' + header + '」。');
+    }
+  });
+  return sheet;
+}
+
+function getFxData_() {
+  var targetSheet = getFxSheet_(FX_TARGET_SHEET_NAME, FX_TARGET_HEADERS);
+  var tradeSheet = getFxSheet_(FX_TRADE_SHEET_NAME, FX_TRADE_HEADERS);
+  return {
+    targets: getFxRecords_(targetSheet, FX_TARGET_HEADERS),
+    trades: getFxRecords_(tradeSheet, FX_TRADE_HEADERS)
+  };
+}
+
+function getFxRecords_(sheet, headers) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) {
+    return [];
+  }
+
+  var lastColumn = sheet.getLastColumn();
+  var values = sheet.getRange(1, 1, lastRow, lastColumn).getValues();
+  var indexes = {};
+  values[0].forEach(function (header, index) {
+    indexes[String(header).trim()] = index;
+  });
+  return values.slice(1).filter(function (row) {
+    return row.some(function (value) { return value !== "" && value !== null; });
+  }).map(function (row) {
+    var record = {};
+    headers.forEach(function (header) {
+      record[header] = row[indexes[header]];
+    });
+    return record;
+  });
+}
+
+function validateFxCurrency_(contents) {
+  var code = String(contents.currencyCode || "").trim().toUpperCase();
+  var name = String(contents.currencyName || "").trim();
+  if (!/^[A-Z]{3}$/.test(code) || !name || name.length > 40) {
+    throw new Error("幣別代碼或名稱無效。");
+  }
+  return { code: code, name: name };
+}
+
+function saveFxTarget_(contents) {
+  var currency = validateFxCurrency_(contents);
+  var targetRate = Number(contents.targetRate);
+  if (!isFinite(targetRate) || targetRate <= 0) {
+    throw new Error("期望匯率必須是大於 0 的數字。");
+  }
+
+  var sheet = getFxSheet_(FX_TARGET_SHEET_NAME, FX_TARGET_HEADERS);
+  var lastRow = sheet.getLastRow();
+  if (lastRow > 1) {
+    var codes = sheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues();
+    for (var index = 0; index < codes.length; index++) {
+      if (String(codes[index][0]).trim().toUpperCase() === currency.code) {
+        sheet.getRange(index + 2, 1, 1, FX_TARGET_HEADERS.length).setValues([[
+          currency.code,
+          currency.name,
+          targetRate,
+          true
+        ]]);
+        return;
+      }
+    }
+  }
+
+  sheet.appendRow([currency.code, currency.name, targetRate, true]);
+}
+
+function recordFxTrade_(contents) {
+  var currency = validateFxCurrency_(contents);
+  var sellRate = Number(contents.sellRate);
+  var foreignAmount = Number(contents.foreignAmount);
+  if (!isFinite(sellRate) || sellRate <= 0 ||
+      !isFinite(foreignAmount) || foreignAmount < 0) {
+    throw new Error("換匯匯率與金額格式無效。");
+  }
+
+  var sheet = getFxSheet_(FX_TRADE_SHEET_NAME, FX_TRADE_HEADERS);
+  var exchangeDate = Utilities.formatDate(new Date(), MONITOR_TIME_ZONE, "yyyy-MM-dd");
+  sheet.appendRow([
+    exchangeDate,
+    currency.code,
+    currency.name,
+    sellRate,
+    foreignAmount,
+    Number((foreignAmount * sellRate).toFixed(2))
+  ]);
+}
+
+function monitorFxRates() {
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) {
+    console.log("Another monitor run is active; skipping FX monitoring.");
+    return;
+  }
+
+  try {
+    var sheet = getFxSheet_(FX_TARGET_SHEET_NAME, FX_TARGET_HEADERS);
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+      return;
+    }
+
+    var targets = sheet.getRange(2, 1, lastRow - 1, FX_TARGET_HEADERS.length).getValues();
+    var activeTargets = targets.filter(function (row) {
+      return String(row[0]).trim() &&
+        String(row[3]).toLowerCase() !== "false" &&
+        String(row[3]).toLowerCase() !== "no";
+    });
+    if (!activeTargets.length) {
+      return;
+    }
+
+    var response = UrlFetchApp.fetch(BANK_FX_RATE_URL, {
+      headers: {
+        "Accept": "text/csv,text/plain,*/*",
+        "Referer": "https://rate.bot.com.tw/xrt?Lang=zh-TW",
+        "User-Agent": "Mozilla/5.0"
+      },
+      muteHttpExceptions: true
+    });
+    if (response.getResponseCode() !== 200) {
+      throw new Error("讀取臺灣銀行匯率失敗，HTTP " + response.getResponseCode());
+    }
+    var csvText = response.getContentText("UTF-8");
+    if (/^\s*</.test(csvText)) {
+      throw new Error("臺灣銀行匯率服務未回傳 CSV 資料。");
+    }
+    var rows = Utilities.parseCsv(csvText);
+    if (rows.length < 2) {
+      throw new Error("臺灣銀行匯率 CSV 沒有匯率資料。");
+    }
+
+    var rates = {};
+    rows.slice(1).forEach(function (row) {
+      if (row.length < 6) {
+        return;
+      }
+      var code = String(row[0]).trim().toUpperCase();
+      var rate = parseMonitorPrice_(row[5]);
+      if (code && rate > 0) {
+        rates[code] = rate;
+      }
+    });
+
+    var localDate = Utilities.formatDate(new Date(), MONITOR_TIME_ZONE, "yyyyMMdd");
+    var spreadsheetId = SpreadsheetApp.getActiveSpreadsheet().getId();
+    activeTargets.forEach(function (target) {
+      var currencyCode = String(target[0]).trim().toUpperCase();
+      var currencyName = String(target[1]).trim() || currencyCode;
+      var targetRate = parseMonitorPrice_(target[2]);
+      var currentRate = rates[currencyCode];
+      if (!currentRate || !targetRate || currentRate > targetRate) {
+        return;
+      }
+
+      var alertKey = "fx_rate_alert_" + spreadsheetId + "_" + currencyCode + "_" + targetRate;
+      var properties = PropertiesService.getScriptProperties();
+      if (properties.getProperty(alertKey) === localDate) {
+        return;
+      }
+      sendMonitorTelegram_(
+        "💱 【台幣換匯匯率達標】" + currencyName + " (" + currencyCode + ")" +
+        "\n臺灣銀行即期賣出：1 " + currencyCode + " = NT$ " + currentRate.toFixed(4) +
+        "\n反向匯率：1 TWD = " + (1 / currentRate).toFixed(6) + " " + currencyCode +
+        "\n期望值：NT$ " + targetRate.toFixed(4) +
+        "\n達標條件：目前匯率小於或等於期望值。"
+      );
+      properties.setProperty(alertKey, localDate);
+    });
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 function monitorStockPrices() {
